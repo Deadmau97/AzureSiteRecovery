@@ -131,7 +131,7 @@ export function parseRvtoolsBuffer(buffer, originalName = '') {
       id: cryptoRandomId(),
       label: d.label || `Disk ${i + 1}`,
       sizeGiB: d.sizeGiB,
-      family: 'Premium SSD',
+      family: 'Standard SSD',
     })),
   }));
 

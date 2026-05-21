@@ -6,6 +6,7 @@ const state = {
   region: null,
   scenario: 'onprem',
   currency: 'EUR',
+  lastEstimate: null,
 };
 
 const el = (s, r = document) => r.querySelector(s);
@@ -28,7 +29,9 @@ async function init() {
   await loadCurrencies();
   pollStatus();
   wireToolbar();
+  wireRouter();
   addBlankVm();
+  route();
 }
 
 async function loadRegions() {
@@ -65,13 +68,76 @@ function wireToolbar() {
   el('#scenario').addEventListener('change', (e) => (state.scenario = e.target.value));
   el('#addVm').addEventListener('click', () => addBlankVm());
   el('#rvtoolsFile').addEventListener('change', onUploadRvtools);
-  el('#estimate').addEventListener('click', runEstimate);
+  el('#estimate').addEventListener('click', () => navigate('#/results'));
+  el('#backToEditor').addEventListener('click', (e) => { e.preventDefault(); history.length > 1 ? history.back() : navigate('#/'); });
+  el('#backToSummary').addEventListener('click', (e) => { e.preventDefault(); history.length > 1 ? history.back() : navigate('#/results'); });
   el('#refreshPrices').addEventListener('click', async () => {
     await fetch('/api/refresh-prices', { method: 'POST' });
     pollStatus(true);
   });
   el('#exportJson').addEventListener('click', exportProject);
   el('#importJsonFile').addEventListener('change', importProject);
+}
+
+// ---------- Router ----------
+function wireRouter() {
+  window.addEventListener('hashchange', route);
+}
+
+function navigate(hash) {
+  if (location.hash === hash) {
+    route();
+  } else {
+    location.hash = hash;
+  }
+}
+
+function route() {
+  const hash = location.hash || '#/';
+  if (hash === '#/' || hash === '' || hash === '#') {
+    showView('editor');
+    return;
+  }
+  if (hash === '#/results') {
+    showView('results');
+    showResultsSummary();
+    // Trigger fresh estimate every time we land on the results page
+    runEstimate();
+    return;
+  }
+  if (hash.startsWith('#/results/')) {
+    const id = decodeURIComponent(hash.slice('#/results/'.length));
+    showView('results');
+    showResultsDetail(id);
+    return;
+  }
+  showView('editor');
+}
+
+function showView(name) {
+  el('#editor').classList.toggle('hidden', name !== 'editor');
+  el('#results-page').classList.toggle('hidden', name !== 'results');
+  window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
+}
+
+function showResultsSummary() {
+  el('#resultsSummary').classList.remove('hidden');
+  el('#resultsDetail').classList.add('hidden');
+  el('#resultsTitle').textContent = 'Estimate';
+}
+
+function showResultsDetail(vmId) {
+  el('#resultsSummary').classList.add('hidden');
+  el('#resultsDetail').classList.remove('hidden');
+  el('#resultsTitle').textContent = 'VM detail';
+
+  if (!state.lastEstimate) {
+    // Need data first — run estimate then come back
+    el('#vmDetailContent').innerHTML = '<div class="loading">Calculating…</div>';
+    runEstimate().then(() => renderVmDetail(vmId));
+    return;
+  }
+  renderVmDetail(vmId);
 }
 
 async function pollStatus(force = false) {
@@ -117,8 +183,8 @@ function addBlankVm(prefill = {}) {
     os: prefill.os || 'linux',
     powered: prefill.powered ?? true,
     disks: (prefill.disks && prefill.disks.length)
-      ? prefill.disks.map((d) => ({ id: uid(), label: d.label || 'Disk', sizeGiB: d.sizeGiB || 128, family: d.family || 'Premium SSD' }))
-      : [{ id: uid(), label: 'OS disk', sizeGiB: 128, family: 'Premium SSD' }],
+      ? prefill.disks.map((d) => ({ id: uid(), label: d.label || 'Disk', sizeGiB: d.sizeGiB || 128, family: d.family || 'Standard SSD' }))
+      : [{ id: uid(), label: 'OS disk', sizeGiB: 128, family: 'Standard SSD' }],
     recommendedVm: prefill.recommendedVm || null,
   };
   state.vms.push(vm);
@@ -150,7 +216,7 @@ function renderVmCard(vm) {
   );
   el('.remove', node).addEventListener('click', () => removeVm(vm.id));
   el('.add-disk', node).addEventListener('click', () => {
-    const disk = { id: uid(), label: `Disk ${vm.disks.length + 1}`, sizeGiB: 128, family: 'Premium SSD' };
+    const disk = { id: uid(), label: `Disk ${vm.disks.length + 1}`, sizeGiB: 128, family: 'Standard SSD' };
     vm.disks.push(disk);
     appendDiskRow(disk, vm, node);
   });
@@ -299,6 +365,7 @@ async function onUploadRvtools(e) {
 
 // ---------- Estimate ----------
 async function runEstimate() {
+  el('#resultsLoading').classList.remove('hidden');
   el('#estimate').disabled = true;
   try {
     const payload = {
@@ -315,15 +382,20 @@ async function runEstimate() {
 
     if (data.error) {
       showWarnings([data.error]);
-      return;
+      return null;
     }
 
-    el('#results').classList.remove('hidden');
+    state.lastEstimate = data;
+    el('#resultsMeta').textContent =
+      `${data.armRegionName} · ${data.scenario === 'a2a' ? 'Azure → Azure' : 'On-prem → Azure'} · ${data.currency}`;
+
     animateValue('#totalMonthly', data.totals.monthly);
     animateValue('#totalTest', data.totals.testFailover24h);
-    renderPerVm(data.perVm);
+    renderSummaryList(data.perVm);
     showWarnings(data.warnings || []);
+    return data;
   } finally {
+    el('#resultsLoading').classList.add('hidden');
     el('#estimate').disabled = false;
   }
 }
@@ -340,28 +412,62 @@ function animateValue(selector, target) {
   });
 }
 
-function renderPerVm(perVm) {
-  const root = el('#perVmResults');
+function renderSummaryList(perVm) {
+  const root = el('#vmSummaryList');
   root.innerHTML = '';
   for (const v of perVm) {
-    const card = document.createElement('div');
-    card.className = 'result-card';
-    card.innerHTML = `
+    const row = document.createElement('div');
+    row.className = 'vm-summary-row';
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.innerHTML = `
+      <div>
+        <div class="name">${escapeHtml(v.name)}</div>
+        <div class="sub">${v.lineItems.monthly.length} monthly items · ${v.lineItems.test.length} test items</div>
+      </div>
+      <div>
+        <div class="cost-label">Monthly</div>
+        <div class="cost-value">${fmt(v.monthlyTotal)}</div>
+      </div>
+      <div>
+        <div class="cost-label">Test DR (24h)</div>
+        <div class="cost-value">${fmt(v.testTotal)}</div>
+      </div>
+      <div class="chev">›</div>
+    `;
+    const open = () => navigate(`#/results/${encodeURIComponent(v.vmId)}`);
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+    root.appendChild(row);
+  }
+  anime({ targets: '.vm-summary-row', opacity: [0, 1], translateY: [10, 0], delay: anime.stagger(50), duration: 320, easing: 'easeOutQuad' });
+}
+
+function renderVmDetail(vmId) {
+  const data = state.lastEstimate;
+  if (!data) return;
+  const v = data.perVm.find((x) => x.vmId === vmId);
+  const root = el('#vmDetailContent');
+  if (!v) {
+    root.innerHTML = '<div class="loading">VM not found in current estimate.</div>';
+    return;
+  }
+  root.innerHTML = `
+    <div class="result-card">
       <h4>${escapeHtml(v.name)}</h4>
-      <div class="row"><span>Monthly total</span><strong>${fmt(v.monthlyTotal)}</strong></div>
-      <div class="row"><span>24h Test DR total</span><strong>${fmt(v.testTotal)}</strong></div>
+      <div class="row"><span class="desc">Monthly total</span><strong class="amount">${fmt(v.monthlyTotal)}</strong></div>
+      <div class="row"><span class="desc">24h Test DR total</span><strong class="amount">${fmt(v.testTotal)}</strong></div>
       <div class="group">
         <div class="group-title">Monthly line items</div>
-        ${v.lineItems.monthly.map(li => `<div class="row"><span>${escapeHtml(li.category)} — ${escapeHtml(li.detail || '')}</span><span>${fmt(li.amount)}</span></div>`).join('')}
+        ${v.lineItems.monthly.map(li => `<div class="row"><span class="desc">${escapeHtml(li.category)} — ${escapeHtml(li.detail || '')}</span><span class="amount">${fmt(li.amount)}</span></div>`).join('')}
       </div>
       <div class="group">
         <div class="group-title">Test DR line items</div>
-        ${v.lineItems.test.map(li => `<div class="row"><span>${escapeHtml(li.category)} — ${escapeHtml(li.detail || '')}</span><span>${li.info != null ? `(${fmt(li.info)}/mo)` : fmt(li.amount)}</span></div>`).join('')}
+        ${v.lineItems.test.map(li => `<div class="row"><span class="desc">${escapeHtml(li.category)} — ${escapeHtml(li.detail || '')}</span><span class="amount">${li.info != null ? `(${fmt(li.info)}/mo)` : fmt(li.amount)}</span></div>`).join('')}
       </div>
-    `;
-    root.appendChild(card);
-  }
-  anime({ targets: '#perVmResults .result-card', opacity: [0, 1], translateY: [10, 0], delay: anime.stagger(60), duration: 320, easing: 'easeOutQuad' });
+    </div>
+  `;
+  anime({ targets: '#vmDetailContent .result-card', opacity: [0, 1], translateY: [10, 0], duration: 320, easing: 'easeOutQuad' });
 }
 
 function showWarnings(list) {
