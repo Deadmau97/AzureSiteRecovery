@@ -77,6 +77,7 @@ function wireToolbar() {
   });
   el('#exportJson').addEventListener('click', exportProject);
   el('#importJsonFile').addEventListener('change', importProject);
+  el('#downloadPdf').addEventListener('click', downloadEstimatePdf);
 }
 
 // ---------- Router ----------
@@ -198,7 +199,6 @@ function renderVmCard(vm) {
   el('.vm-name', node).value = vm.name;
   el('.vm-vcpu', node).value = vm.vcpu;
   el('.vm-ram', node).value = vm.ramGiB;
-  elAll('input[name=os]', node).forEach((r) => (r.checked = r.value === vm.os));
   el('.vm-target-input', node).value = vm.recommendedVm || '';
 
   // Listeners
@@ -211,9 +211,16 @@ function renderVmCard(vm) {
     vm.ramGiB = Number(e.target.value) || 0;
     refreshSuggestions(vm, node);
   });
-  elAll('input[name=os]', node).forEach((r) =>
-    r.addEventListener('change', () => (vm.os = r.checked ? r.value : vm.os))
-  );
+  // Graphical OS toggle (Linux / Windows icon buttons)
+  const osBtns = elAll('.os-btn', node);
+  const syncOsBtns = () => osBtns.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.os === vm.os)));
+  syncOsBtns();
+  osBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      vm.os = btn.dataset.os;
+      syncOsBtns();
+    });
+  });
   el('.remove', node).addEventListener('click', () => removeVm(vm.id));
   el('.add-disk', node).addEventListener('click', () => {
     const disk = { id: uid(), label: `Disk ${vm.disks.length + 1}`, sizeGiB: 128, family: 'Standard SSD' };
@@ -512,4 +519,240 @@ async function importProject(e) {
     showWarnings([`Import failed: ${err.message}`]);
   }
   e.target.value = '';
+}
+
+// ---------- PDF download ----------
+async function downloadEstimatePdf() {
+  // Ensure we have a fresh estimate to print
+  if (!state.lastEstimate) {
+    showWarnings(['Generating estimate before exporting…']);
+    await runEstimate();
+  }
+  const data = state.lastEstimate;
+  if (!data) return;
+
+  if (typeof pdfMake === 'undefined') {
+    showWarnings(['PDF library failed to load. Check your internet connection and retry.']);
+    return;
+  }
+
+  const doc = buildPdfDoc(data);
+  const filename = `asr-estimate-${data.armRegionName}-${new Date().toISOString().slice(0,10)}.pdf`;
+  pdfMake.createPdf(doc).download(filename);
+}
+
+function buildPdfDoc(data) {
+  const colors = {
+    text: '#1a2347',
+    muted: '#6b7591',
+    accent: '#6ea8ff',
+    accent2: '#b48cff',
+    line: '#d6dbf0',
+  };
+
+  const scenarioLabel = data.scenario === 'a2a' ? 'Azure → Azure' : 'On-prem → Azure';
+  const generated = new Date().toLocaleString();
+
+  // ----- Page 1: summary -----
+  const summaryRows = [
+    [
+      { text: 'VM', style: 'th' },
+      { text: 'DR target', style: 'th' },
+      { text: 'OS', style: 'th' },
+      { text: 'Monthly', style: 'th', alignment: 'right' },
+      { text: 'Test DR (24h)', style: 'th', alignment: 'right' },
+    ],
+    ...data.perVm.map((v) => {
+      const sourceVm = state.vms.find((sv) => sv.id === v.vmId);
+      const os = sourceVm?.os === 'windows' ? 'Windows' : 'Linux';
+      const target = sourceVm?.recommendedVm || '—';
+      return [
+        { text: v.name, style: 'td' },
+        { text: target, style: 'td' },
+        { text: os, style: 'td' },
+        { text: fmt(v.monthlyTotal), style: 'td', alignment: 'right' },
+        { text: fmt(v.testTotal), style: 'td', alignment: 'right' },
+      ];
+    }),
+    [
+      { text: 'TOTAL', style: 'tdBold', colSpan: 3 }, {}, {},
+      { text: fmt(data.totals.monthly), style: 'tdBold', alignment: 'right' },
+      { text: fmt(data.totals.testFailover24h), style: 'tdBold', alignment: 'right' },
+    ],
+  ];
+
+  const content = [
+    { text: 'Azure Site Recovery — Estimate', style: 'h1' },
+    { text: `Generated ${generated}`, style: 'sub' },
+
+    {
+      style: 'metaTable',
+      table: {
+        widths: [90, '*'],
+        body: [
+          [{ text: 'Region', style: 'metaKey' }, { text: data.armRegionName, style: 'metaVal' }],
+          [{ text: 'Scenario', style: 'metaKey' }, { text: scenarioLabel, style: 'metaVal' }],
+          [{ text: 'Currency', style: 'metaKey' }, { text: data.currency, style: 'metaVal' }],
+          [{ text: 'VMs', style: 'metaKey' }, { text: String(data.perVm.length), style: 'metaVal' }],
+        ],
+      },
+      layout: 'noBorders',
+      margin: [0, 0, 0, 14],
+    },
+
+    {
+      columns: [
+        {
+          width: '*',
+          stack: [
+            { text: 'Monthly ASR cost', style: 'totalLabel' },
+            { text: fmt(data.totals.monthly), style: 'totalValue' },
+          ],
+          margin: [0, 0, 8, 0],
+        },
+        {
+          width: '*',
+          stack: [
+            { text: '24h Test DR cost', style: 'totalLabel', color: colors.accent2 },
+            { text: fmt(data.totals.testFailover24h), style: 'totalValueAccent' },
+          ],
+          margin: [8, 0, 0, 0],
+        },
+      ],
+      margin: [0, 6, 0, 18],
+    },
+
+    { text: 'Per-VM summary', style: 'h2', margin: [0, 6, 0, 6] },
+    {
+      table: { headerRows: 1, widths: ['*', 110, 50, 75, 75], body: summaryRows },
+      layout: {
+        hLineColor: () => colors.line,
+        vLineColor: () => colors.line,
+        hLineWidth: (i) => (i === 0 || i === 1 ? 0.8 : 0.3),
+        vLineWidth: () => 0,
+        paddingTop: () => 6,
+        paddingBottom: () => 6,
+      },
+    },
+
+    ...(data.warnings && data.warnings.length
+      ? [
+          { text: 'Notes', style: 'h2', margin: [0, 18, 0, 4] },
+          { ul: data.warnings.map((w) => ({ text: w, fontSize: 9, color: colors.muted })) },
+        ]
+      : []),
+  ];
+
+  // ----- Page 2..N: per-VM detail -----
+  data.perVm.forEach((v, idx) => {
+    const sourceVm = state.vms.find((sv) => sv.id === v.vmId);
+    const target = sourceVm?.recommendedVm || '—';
+    const os = sourceVm?.os === 'windows' ? 'Windows' : 'Linux';
+
+    content.push({ text: '', pageBreak: 'before' });
+    content.push({ text: v.name, style: 'h1' });
+    content.push({
+      style: 'metaTable',
+      table: {
+        widths: [90, '*'],
+        body: [
+          [{ text: 'DR target VM', style: 'metaKey' }, { text: target, style: 'metaVal' }],
+          [{ text: 'Operating system', style: 'metaKey' }, { text: os, style: 'metaVal' }],
+          [{ text: 'Source vCPU / RAM', style: 'metaKey' }, { text: `${sourceVm?.vcpu || '—'} vCPU · ${sourceVm?.ramGiB || '—'} GiB`, style: 'metaVal' }],
+          [{ text: 'Disks', style: 'metaKey' }, { text: String((sourceVm?.disks || []).length), style: 'metaVal' }],
+        ],
+      },
+      layout: 'noBorders',
+      margin: [0, 0, 0, 14],
+    });
+
+    content.push({
+      columns: [
+        { width: '*', stack: [{ text: 'Monthly total', style: 'totalLabel' }, { text: fmt(v.monthlyTotal), style: 'totalValueSm' }] },
+        { width: '*', stack: [{ text: 'Test DR (24h)', style: 'totalLabel', color: colors.accent2 }, { text: fmt(v.testTotal), style: 'totalValueSmAccent' }] },
+      ],
+      margin: [0, 0, 0, 16],
+    });
+
+    content.push({ text: 'Monthly line items', style: 'h2', margin: [0, 4, 0, 4] });
+    content.push(lineItemTable(v.lineItems.monthly, colors));
+
+    content.push({ text: 'Test DR (24h) line items', style: 'h2', margin: [0, 14, 0, 4] });
+    content.push(lineItemTable(v.lineItems.test, colors, true));
+  });
+
+  return {
+    pageSize: 'A4',
+    pageMargins: [40, 50, 40, 50],
+    info: { title: 'ASR Estimate', subject: `ASR estimate for ${data.armRegionName}`, creator: 'ASR Estimator' },
+    footer: (page, total) => ({
+      columns: [
+        { text: 'Azure Site Recovery Estimator', alignment: 'left', margin: [40, 0], fontSize: 8, color: colors.muted },
+        { text: `${page} / ${total}`, alignment: 'right', margin: [0, 0, 40, 0], fontSize: 8, color: colors.muted },
+      ],
+      margin: [0, 20, 0, 0],
+    }),
+    content,
+    defaultStyle: { fontSize: 10, color: colors.text },
+    styles: {
+      h1: { fontSize: 22, bold: true, margin: [0, 0, 0, 4], color: colors.text },
+      h2: { fontSize: 13, bold: true, color: colors.text },
+      sub: { fontSize: 9, color: colors.muted, margin: [0, 0, 0, 14] },
+      metaTable: { fontSize: 9 },
+      metaKey: { color: colors.muted, fontSize: 9, margin: [0, 2, 0, 2] },
+      metaVal: { fontSize: 10, margin: [0, 2, 0, 2] },
+      totalLabel: { fontSize: 9, color: colors.muted, characterSpacing: 0.5 },
+      totalValue: { fontSize: 22, bold: true, color: colors.accent, margin: [0, 2, 0, 0] },
+      totalValueAccent: { fontSize: 22, bold: true, color: colors.accent2, margin: [0, 2, 0, 0] },
+      totalValueSm: { fontSize: 16, bold: true, color: colors.accent, margin: [0, 2, 0, 0] },
+      totalValueSmAccent: { fontSize: 16, bold: true, color: colors.accent2, margin: [0, 2, 0, 0] },
+      th: { bold: true, fontSize: 9, color: colors.muted, characterSpacing: 0.4 },
+      td: { fontSize: 9 },
+      tdBold: { fontSize: 10, bold: true },
+    },
+  };
+}
+
+function lineItemTable(items, colors, isTest = false) {
+  const body = [
+    [
+      { text: 'Category', style: 'th' },
+      { text: 'Detail', style: 'th' },
+      { text: 'Amount', style: 'th', alignment: 'right' },
+    ],
+    ...items.map((li) => [
+      { text: li.category, style: 'td' },
+      { text: li.detail || '', style: 'td', color: colors.muted },
+      {
+        text: li.info != null ? `(${fmt(li.info)}/mo)` : fmt(li.amount),
+        style: 'td',
+        alignment: 'right',
+      },
+    ]),
+  ];
+  if (!isTest) {
+    // Show monthly sum
+    const total = items.reduce((s, li) => s + (li.info != null ? 0 : li.amount), 0);
+    body.push([
+      { text: 'Subtotal', style: 'tdBold', colSpan: 2 }, {},
+      { text: fmt(total), style: 'tdBold', alignment: 'right' },
+    ]);
+  } else {
+    const total = items.reduce((s, li) => s + (li.info != null ? 0 : li.amount), 0);
+    body.push([
+      { text: 'Subtotal (24h)', style: 'tdBold', colSpan: 2 }, {},
+      { text: fmt(total), style: 'tdBold', alignment: 'right' },
+    ]);
+  }
+  return {
+    table: { headerRows: 1, widths: [130, '*', 75], body },
+    layout: {
+      hLineColor: () => colors.line,
+      vLineColor: () => colors.line,
+      hLineWidth: (i) => (i === 0 || i === 1 ? 0.8 : 0.3),
+      vLineWidth: () => 0,
+      paddingTop: () => 5,
+      paddingBottom: () => 5,
+    },
+  };
 }

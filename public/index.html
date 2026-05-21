@@ -69,6 +69,10 @@
           </button>
           <h2 id="resultsTitle">Estimate</h2>
           <span id="resultsMeta" class="muted"></span>
+          <button id="downloadPdf" class="btn accent" title="Download estimate as PDF">
+            <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10M6 9l4 4 4-4M4 16h12"/></svg>
+            <span>Download PDF</span>
+          </button>
         </header>
 
         <div id="resultsLoading" class="loading hidden">Calculating…</div>
@@ -104,10 +108,30 @@
       <article class="vm-card" data-vm-id>
         <header class="vm-head">
           <input class="vm-name field-flat" placeholder="VM name" />
-          <span class="os-toggle">
-            <label><input type="radio" name="os" value="linux" checked /> Linux</label>
-            <label><input type="radio" name="os" value="windows" /> Windows</label>
-          </span>
+          <div class="os-toggle" role="radiogroup" aria-label="Operating system">
+            <button type="button" class="os-btn" data-os="linux" aria-pressed="true" title="Linux" aria-label="Linux">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <ellipse cx="16" cy="21" rx="8" ry="8.5" fill="#1a1a1a"/>
+                <ellipse cx="16" cy="22" rx="5" ry="6" fill="#ffffff"/>
+                <ellipse cx="16" cy="11" rx="6" ry="6.5" fill="#1a1a1a"/>
+                <ellipse cx="13.5" cy="10" rx="1.7" ry="2.1" fill="#ffffff"/>
+                <ellipse cx="18.5" cy="10" rx="1.7" ry="2.1" fill="#ffffff"/>
+                <circle cx="13.7" cy="10.4" r="0.9" fill="#000"/>
+                <circle cx="18.3" cy="10.4" r="0.9" fill="#000"/>
+                <path d="M14 13 Q16 14.5 18 13 L17 15.5 Q16 16.2 15 15.5 Z" fill="#f5a623"/>
+                <ellipse cx="12" cy="29" rx="3.2" ry="1.6" fill="#f5a623"/>
+                <ellipse cx="20" cy="29" rx="3.2" ry="1.6" fill="#f5a623"/>
+              </svg>
+            </button>
+            <button type="button" class="os-btn" data-os="windows" aria-pressed="false" title="Windows" aria-label="Windows">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <rect x="3" y="4" width="12" height="12" rx="1" fill="#f25022"/>
+                <rect x="17" y="4" width="12" height="12" rx="1" fill="#7fba00"/>
+                <rect x="3" y="18" width="12" height="12" rx="1" fill="#00a4ef"/>
+                <rect x="17" y="18" width="12" height="12" rx="1" fill="#ffb900"/>
+              </svg>
+            </button>
+          </div>
           <button class="remove icon-btn icon-btn-danger" title="Remove VM" aria-label="Remove VM">
             <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6l8 8M14 6l-8 8"/></svg>
           </button>
@@ -154,6 +178,8 @@
     </template>
 
     <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.2/lib/anime.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.10/pdfmake.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.10/vfs_fonts.js"></script>
     <script src="/app.js" type="module"></script>
   </body>
 </html>
