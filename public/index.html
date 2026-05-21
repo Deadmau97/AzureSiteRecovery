@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Azure Site Recovery Estimator</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <h1>ASR Estimator</h1>
+      </div>
+      <div class="controls">
+        <label>
+          Region
+          <select id="region"></select>
+        </label>
+        <label>
+          Scenario
+          <select id="scenario">
+            <option value="onprem">VMware / Hyper-V → Azure</option>
+            <option value="a2a">Azure → Azure</option>
+          </select>
+        </label>
+        <label>
+          Currency
+          <select id="currency">
+            <option>EUR</option>
+            <option>USD</option>
+          </select>
+        </label>
+        <button id="refreshPrices" class="ghost" title="Re-fetch Azure retail prices">↻ Prices</button>
+        <span id="status" class="status">…</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="actions">
+        <label class="upload">
+          <input type="file" id="rvtoolsFile" accept=".xlsx,.xls,.csv" hidden />
+          <span class="btn primary">Upload RVTools export</span>
+        </label>
+        <button id="addVm" class="btn">+ Add VM</button>
+        <button id="exportJson" class="btn ghost">Export JSON</button>
+        <label class="btn ghost">
+          Import JSON
+          <input type="file" id="importJsonFile" accept=".json" hidden />
+        </label>
+        <button id="estimate" class="btn accent">Estimate</button>
+      </section>
+
+      <section id="warnings" class="warnings hidden"></section>
+
+      <section id="vmList" class="vm-list"></section>
+
+      <section id="results" class="results hidden">
+        <div class="totals">
+          <div class="card">
+            <span class="label">Monthly ASR cost</span>
+            <span class="value" id="totalMonthly">—</span>
+          </div>
+          <div class="card accent">
+            <span class="label">24h Test DR cost</span>
+            <span class="value" id="totalTest">—</span>
+          </div>
+        </div>
+        <div id="perVmResults" class="per-vm-results"></div>
+      </section>
+    </main>
+
+    <template id="vmCardTpl">
+      <article class="vm-card" data-vm-id>
+        <header class="vm-head">
+          <input class="vm-name" placeholder="VM name" />
+          <span class="os-toggle">
+            <label><input type="radio" name="os" value="linux" checked /> Linux</label>
+            <label><input type="radio" name="os" value="windows" /> Windows</label>
+          </span>
+          <button class="remove ghost" title="Remove VM">✕</button>
+        </header>
+        <div class="vm-grid">
+          <label>vCPU <input type="number" class="vm-vcpu" min="1" value="2" /></label>
+          <label>RAM (GiB) <input type="number" class="vm-ram" min="0.5" step="0.5" value="8" /></label>
+          <div class="vm-rec">
+            <label>DR target VM
+              <div class="combo">
+                <input type="text" class="vm-target-input" placeholder="Best fit will be suggested..." />
+                <ul class="vm-target-results hidden"></ul>
+              </div>
+            </label>
+            <ul class="vm-suggestions"></ul>
+          </div>
+        </div>
+        <div class="disks">
+          <div class="disks-head">
+            <h3>Disks</h3>
+            <button class="add-disk ghost">+ Disk</button>
+          </div>
+          <ul class="disk-list"></ul>
+        </div>
+      </article>
+    </template>
+
+    <template id="diskRowTpl">
+      <li class="disk-row" data-disk-id>
+        <input type="text" class="disk-label" placeholder="Disk label" />
+        <input type="number" class="disk-size" min="1" value="128" /> <span>GiB</span>
+        <select class="disk-family">
+          <option>Premium SSD</option>
+          <option>Standard SSD</option>
+        </select>
+        <span class="disk-tier muted"></span>
+        <button class="disk-remove ghost">✕</button>
+      </li>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.2/lib/anime.min.js"></script>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
