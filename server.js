@@ -20,6 +20,7 @@ import { listTiers, DISK_FAMILIES } from './src/diskTiers.js';
 import { parseRvtoolsBuffer } from './src/rvtools.js';
 import { recommendVms, searchVms } from './src/recommender.js';
 import { estimateProject } from './src/estimator.js';
+import { findDiskPrice } from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -81,6 +82,31 @@ app.post('/api/refresh-prices', async (req, res) => {
   // Fire-and-forget; client polls /api/status
   warmCache().catch((e) => console.error('refresh error', e));
   res.json({ started: true });
+});
+
+// Debug: resolved monthly price for every disk tier in a region.
+// Use it to sanity-check that prices increase with size (E1 < E2 < E3 < ...).
+app.get('/api/disk-prices', (req, res) => {
+  const { region, family, currency } = req.query;
+  const cur = currency || 'EUR';
+  const fam = family || 'Standard SSD';
+  const reg = region;
+  if (!reg) return res.status(400).json({ error: 'region query parameter is required' });
+  if (!DISK_FAMILIES.includes(fam)) return res.status(400).json({ error: 'Unknown family' });
+  const tiers = listTiers(fam);
+  const rows = tiers.map((t) => {
+    const p = findDiskPrice(cur, reg, fam, t.sku);
+    return {
+      sku: t.sku,
+      sizeGiB: t.sizeGiB,
+      family: fam,
+      retailPrice: p?.retailPrice ?? null,
+      unitOfMeasure: p?.unitOfMeasure ?? null,
+      meterName: p?.meterName ?? null,
+      currency: cur,
+    };
+  });
+  res.json({ region: reg, family: fam, currency: cur, rows });
 });
 
 const PORT = process.env.PORT || 3000;

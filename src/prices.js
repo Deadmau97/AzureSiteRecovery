@@ -128,9 +128,14 @@ function getRegional(items, armRegionName) {
 
 export function findAsrPrice(currency, armRegionName, scenario) {
   const items = cache[currency]?.asr || [];
-  // Scenarios map to meterName / skuName patterns. Documented ASR meter is "Protected Instance".
-  // For most current scenarios the meter is generic; pricing is the same per protected instance.
-  const regional = getRegional(items, armRegionName);
+  // ASR has multiple meters per region (protected instances, replication bandwidth,
+  // data transfer). The per-instance protection fee is a "1/Month" unit on a meter
+  // containing "Protected Instance".
+  const regional = getRegional(items, armRegionName).filter(
+    (i) =>
+      /month/i.test(i.unitOfMeasure || '') &&
+      /protected instance/i.test(i.meterName || '')
+  );
   if (regional.length === 0) return null;
 
   const lower = (s) => (s || '').toLowerCase();
@@ -141,10 +146,9 @@ export function findAsrPrice(currency, armRegionName, scenario) {
       regional.find((i) => lower(i.meterName).includes('azure to azure')) ||
       regional.find((i) => lower(i.skuName).includes('a2a'));
   } else {
-    // VMware/Hyper-V on-prem to Azure
     candidate =
       regional.find((i) => lower(i.meterName).includes('to azure') && !lower(i.meterName).includes('azure to azure')) ||
-      regional.find((i) => lower(i.meterName).includes('protected instance'));
+      regional.find((i) => /on.?premises|hyper.?v|vmware|physical/.test(lower(i.meterName)));
   }
   if (!candidate) candidate = regional[0];
   return candidate
@@ -161,21 +165,38 @@ export function findAsrPrice(currency, armRegionName, scenario) {
 export function findDiskPrice(currency, armRegionName, family, skuName) {
   // family: 'Premium SSD' | 'Standard SSD'
   // skuName: 'P10', 'E20', etc.
+  //
+  // The Retail Prices API returns SEVERAL line items per disk SKU that share the same
+  // skuName ("E1 LRS"). For example: monthly tier fee, disk operations (per 10k), disk
+  // mounts, bursting, etc. We must pin the lookup to the monthly tier fee, otherwise we
+  // pick up a per-transaction price that has no relation to the tier ladder
+  // (e.g. E1 LRS Disk Operations can be > E10 LRS Disk per-month).
   const items = cache[currency]?.disks || [];
   const productName = family === 'Premium SSD' ? 'Premium SSD Managed Disks' : 'Standard SSD Managed Disks';
-  const regional = items.filter(
-    (i) => i.armRegionName === armRegionName && i.productName === productName
+  const target = `${skuName} LRS`;
+
+  const monthly = items.filter(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      i.productName === productName &&
+      i.skuName === target &&
+      /month/i.test(i.unitOfMeasure || '') &&
+      !/operations|mounts|bursting|provisioned|iops|throughput|snapshot/i.test(i.meterName || '')
   );
-  // skuName in API is like 'P10 LRS', 'E20 LRS' (also ZRS variants). Pick LRS by default.
+
+  // Among remaining monthly meters, prefer the one whose meterName ends with " Disk"
+  // (the per-disk tier fee), then any remaining.
   const hit =
-    regional.find((i) => i.skuName === `${skuName} LRS`) ||
-    regional.find((i) => i.skuName.startsWith(`${skuName} `) && !i.skuName.includes('ZRS')) ||
-    regional.find((i) => i.skuName.startsWith(`${skuName}`));
+    monthly.find((i) => /\bdisk(s)?$/i.test(i.meterName || '')) ||
+    monthly.find((i) => / disk(s)? /i.test(i.meterName || '')) ||
+    monthly[0];
+
   return hit
     ? {
         retailPrice: hit.retailPrice,
-        unitOfMeasure: hit.unitOfMeasure, // typically "1/Month"
+        unitOfMeasure: hit.unitOfMeasure, // "1/Month"
         skuName: hit.skuName,
+        meterName: hit.meterName,
         currency,
       }
     : null;
