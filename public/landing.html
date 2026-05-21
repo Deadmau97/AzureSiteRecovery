@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud Utilities</title>
+    <link rel="stylesheet" href="/landing.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div class="brand-row">
+        <span class="dot"></span>
+        <span class="brand-name">Cloud Utilities</span>
+      </div>
+      <h1>Operational tools for your Azure workloads</h1>
+      <p class="lead">
+        A growing collection of estimator and assessment utilities. Pick a tool below to get started.
+      </p>
+    </header>
+
+    <main class="tiles">
+      <a class="tile available" href="/asr">
+        <div class="tile-icon">
+          <img
+            src="https://azure.microsoft.com/svghandler/site-recovery/?width=600&height=315"
+            alt="Azure Site Recovery"
+            loading="lazy"
+          />
+        </div>
+        <div class="tile-body">
+          <h2>ASR Calculator</h2>
+          <p>
+            Estimate the monthly Azure Site Recovery cost (protected instance fee, replica disks,
+            cache storage and Azure-to-Azure replication egress) and the 24-hour Test DR cost for
+            any list of VMs. Supports RVTools import.
+          </p>
+        </div>
+        <div class="tile-foot">
+          <span class="badge ready">Available</span>
+          <span class="cta">Open <span class="arrow">→</span></span>
+        </div>
+      </a>
+
+      <div class="tile coming" aria-disabled="true">
+        <div class="tile-icon placeholder">
+          <svg viewBox="0 0 80 80" aria-hidden="true">
+            <rect
+              x="6"
+              y="6"
+              width="68"
+              height="68"
+              rx="12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-dasharray="4 4"
+            />
+            <path
+              d="M28 40h24M40 28v24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="3"
+              stroke-linecap="round"
+            />
+          </svg>
+        </div>
+        <div class="tile-body">
+          <h2>Azure Calculator</h2>
+          <p>
+            General-purpose Azure cost estimator for compute, storage, networking and managed
+            services. Will share the same projects/import format as the ASR Calculator.
+          </p>
+        </div>
+        <div class="tile-foot">
+          <span class="badge building">
+            <span class="pulse"></span> Building
+          </span>
+          <span class="cta muted">Coming soon</span>
+        </div>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <span>v0.3.0 · Cloud Utilities</span>
+    </footer>
+  </body>
+</html>

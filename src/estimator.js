@@ -17,6 +17,7 @@ import {
   findVmPrice,
   findCacheStoragePricePerGiBMonth,
   findStandardPublicIpPricePerHour,
+  findInterRegionEgressPricePerGiB,
   vmHourlyToMonthly,
   HOURS_PER_MONTH,
 } from './prices.js';
@@ -103,6 +104,25 @@ export function estimateProject({
         });
       } else {
         warnings.push(`No cache-storage price found for ${armRegionName}/${currency}.`);
+      }
+    }
+
+    // ---- Inter-region replication egress (Azure-to-Azure only) ----
+    // ASR continuously replicates the disk delta from the source region to the DR region.
+    // We approximate the monthly outbound traffic as totalDiskGiB × churn%/day × 30 days.
+    if (scenario === 'a2a' && totalDiskGiB > 0) {
+      const monthlyEgressGiB = totalDiskGiB * (churnPctPerDay / 100) * 30;
+      const bw = findInterRegionEgressPricePerGiB(currency, armRegionName);
+      if (bw) {
+        const monthly = bw.retailPrice * monthlyEgressGiB;
+        vmMonthly += monthly;
+        lineItems.monthly.push({
+          category: 'Inter-region replication egress',
+          detail: `~${monthlyEgressGiB.toFixed(1)} GiB/mo (churn ${churnPctPerDay}%/day × 30d) · ${bw.skuName || bw.meterName}`,
+          amount: monthly,
+        });
+      } else {
+        warnings.push(`No inter-region egress price found for ${armRegionName}/${currency}.`);
       }
     }
 

@@ -45,6 +45,7 @@ function regionOr(regions) {
 //   vms:        Item[],
 //   cacheStore: Item[],
 //   publicIp:   Item[],
+//   bandwidth:  Item[],   // inter-region egress
 //   updatedAt:  Date,
 // }
 
@@ -64,6 +65,7 @@ export function getStatus() {
       vmCount: cache[cur]?.vms?.length || 0,
       cacheStoreCount: cache[cur]?.cacheStore?.length || 0,
       publicIpCount: cache[cur]?.publicIp?.length || 0,
+      bandwidthCount: cache[cur]?.bandwidth?.length || 0,
     })),
   };
 }
@@ -86,13 +88,17 @@ export async function warmCache({ verbose = true } = {}) {
       const cacheStoreFilter = `serviceName eq 'Storage' and (productName eq 'General Block Blob v2 Hierarchical Namespace' or productName eq 'Standard Page Blob v2' or productName eq 'General Block Blob v2') and ${regionFilter} and priceType eq 'Consumption'`;
       // 5. Public IP — Standard Static IPv4
       const publicIpFilter = `serviceName eq 'Virtual Network' and productName eq 'IP Addresses' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 6. Bandwidth — inter-region egress. No regionFilter because some bandwidth meters
+      // are sold as global SKUs (Zone 1/2/3) without an armRegionName.
+      const bandwidthFilter = `serviceName eq 'Bandwidth' and priceType eq 'Consumption'`;
 
-      const [asr, disks, vms, cacheStore, publicIp] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
         fetchAllPages(cacheStoreFilter, currency),
         fetchAllPages(publicIpFilter, currency),
+        fetchAllPages(bandwidthFilter, currency, { pageLimit: 20 }),
       ]);
 
       cache[currency] = {
@@ -101,6 +107,7 @@ export async function warmCache({ verbose = true } = {}) {
         vms,
         cacheStore,
         publicIp,
+        bandwidth,
         updatedAt: new Date(),
       };
 
@@ -108,7 +115,7 @@ export async function warmCache({ verbose = true } = {}) {
         console.log(
           `[prices] ${currency} warmed in ${Date.now() - t0}ms ` +
             `(asr=${asr.length}, disks=${disks.length}, vms=${vms.length}, ` +
-            `cacheStore=${cacheStore.length}, publicIp=${publicIp.length})`
+            `cacheStore=${cacheStore.length}, publicIp=${publicIp.length}, bandwidth=${bandwidth.length})`
         );
       }
     }
@@ -128,46 +135,34 @@ function getRegional(items, armRegionName) {
 
 export function findAsrPrice(currency, armRegionName, scenario) {
   const items = cache[currency]?.asr || [];
-  // ASR meter names vary: "Disaster Recovery to Azure", "Disaster Recovery for Azure VMs",
-  // "Protected Instance(s)", etc. The unit is typically "1 Hour" (per protected instance,
-  // per hour) — the estimator will convert hourly → monthly when needed.
-  // Exclude clearly non-instance meters (replication bandwidth, data transfer, storage).
+  // Per Microsoft: "Azure Site Recovery between Azure regions is charged at the same rate
+  // as Azure Site Recovery to Azure." So we always look up the "to Azure" meter, even for
+  // the A2A scenario. The literal "Azure to Azure" meter in the API is a BYOL/customer-
+  // owned rate that we intentionally exclude.
   const regional = getRegional(items, armRegionName).filter(
     (i) =>
       !/bandwidth|data transfer|transfer out|egress|ingress|operations|storage/i.test(
         i.meterName || ''
-      )
+      ) &&
+      !/azure to azure/i.test(i.meterName || '')
   );
   if (regional.length === 0) return null;
 
   const lower = (s) => (s || '').toLowerCase();
-  let candidate = null;
+  const candidate =
+    regional.find((i) => lower(i.meterName).includes('to azure')) ||
+    regional.find((i) => lower(i.meterName).includes('disaster recovery')) ||
+    regional.find((i) => lower(i.meterName).includes('protected instance')) ||
+    regional[0];
 
-  if (scenario === 'a2a') {
-    candidate =
-      regional.find((i) => lower(i.meterName).includes('azure to azure')) ||
-      regional.find((i) => lower(i.meterName).includes('for azure vms')) ||
-      regional.find((i) => lower(i.skuName).includes('a2a'));
-  } else {
-    candidate =
-      regional.find(
-        (i) =>
-          lower(i.meterName).includes('to azure') &&
-          !lower(i.meterName).includes('azure to azure') &&
-          !lower(i.meterName).includes('for azure vms')
-      ) ||
-      regional.find((i) => /on.?premises|hyper.?v|vmware|physical/.test(lower(i.meterName))) ||
-      regional.find((i) => lower(i.meterName).includes('protected instance')) ||
-      regional.find((i) => lower(i.meterName).includes('disaster recovery'));
-  }
-  if (!candidate) candidate = regional[0];
   return candidate
     ? {
         retailPrice: candidate.retailPrice,
-        unitOfMeasure: candidate.unitOfMeasure, // "1 Hour" or "1/Month"
+        unitOfMeasure: candidate.unitOfMeasure, // typically "1 Hour"
         meterName: candidate.meterName,
         productName: candidate.productName,
         skuName: candidate.skuName,
+        scenarioApplied: scenario,
         currency,
       }
     : null;
@@ -279,6 +274,56 @@ export function findStandardPublicIpPricePerHour(currency, armRegionName) {
         unitOfMeasure: hit.unitOfMeasure, // "1 Hour"
         meterName: hit.meterName,
         skuName: hit.skuName,
+        currency,
+      }
+    : null;
+}
+
+// Inter-region bandwidth (Zone 1 by default — covers our curated EU regions).
+// Used to estimate Azure-to-Azure replication egress.
+export function findInterRegionEgressPricePerGiB(currency, armRegionName) {
+  const items = cache[currency]?.bandwidth || [];
+  const isEU = /europe|france|italy|sweden|germany|switzerland|spain|poland|norway|uk/i.test(
+    armRegionName || ''
+  );
+  const preferredZone = isEU ? 'zone 1' : null;
+
+  const lower = (s) => (s || '').toLowerCase();
+  const matchesInterRegion = (i) =>
+    /inter[- ]?region/i.test(i.meterName || '') ||
+    /inter[- ]?region/i.test(i.productName || '') ||
+    /inter[- ]?region/i.test(i.skuName || '');
+
+  const isPerGb = (i) => /gb/i.test(i.unitOfMeasure || '');
+
+  let pool = items.filter((i) => matchesInterRegion(i) && isPerGb(i));
+  if (pool.length === 0) {
+    // Fallback: any "transfer out" bandwidth meter priced per GB.
+    pool = items.filter(
+      (i) =>
+        /transfer out|outbound data transfer/i.test(i.meterName || '') && isPerGb(i)
+    );
+  }
+  if (pool.length === 0) return null;
+
+  const hit =
+    (preferredZone &&
+      pool.find(
+        (i) =>
+          lower(i.skuName).includes(preferredZone) ||
+          lower(i.meterName).includes(preferredZone) ||
+          lower(i.productName).includes(preferredZone)
+      )) ||
+    pool.find((i) => lower(i.skuName).includes('zone 1')) ||
+    pool[0];
+
+  return hit
+    ? {
+        retailPrice: hit.retailPrice,
+        unitOfMeasure: hit.unitOfMeasure, // "1 GB"
+        meterName: hit.meterName,
+        skuName: hit.skuName,
+        productName: hit.productName,
         currency,
       }
     : null;

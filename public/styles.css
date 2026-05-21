@@ -38,8 +38,9 @@ body {
   z-index: 10;
 }
 
-.brand { display: flex; align-items: center; gap: 12px; }
-.brand h1 { font-size: 18px; margin: 0; letter-spacing: 0.4px; }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; }
+.brand:hover h1 { color: var(--accent); }
+.brand h1 { font-size: 18px; margin: 0; letter-spacing: 0.4px; transition: color .15s ease; }
 .brand .dot {
   width: 14px; height: 14px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));

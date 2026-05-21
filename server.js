@@ -27,7 +27,17 @@ const app = express();
 const upload = multer({ limits: { fileSize: 50 * 1024 * 1024 } });
 
 app.use(express.json({ limit: '5mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Explicit routes for the landing page and the ASR app, then static middleware for
+// every shared asset (styles.css, app.js, etc.).
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'landing.html'));
+});
+app.get(['/asr', '/asr/'], (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 app.get('/api/status', (req, res) => {
   res.json(getStatus());
