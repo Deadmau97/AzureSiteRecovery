@@ -128,13 +128,15 @@ function getRegional(items, armRegionName) {
 
 export function findAsrPrice(currency, armRegionName, scenario) {
   const items = cache[currency]?.asr || [];
-  // ASR has multiple meters per region (protected instances, replication bandwidth,
-  // data transfer). The per-instance protection fee is a "1/Month" unit on a meter
-  // containing "Protected Instance".
+  // ASR meter names vary: "Disaster Recovery to Azure", "Disaster Recovery for Azure VMs",
+  // "Protected Instance(s)", etc. The unit is typically "1 Hour" (per protected instance,
+  // per hour) — the estimator will convert hourly → monthly when needed.
+  // Exclude clearly non-instance meters (replication bandwidth, data transfer, storage).
   const regional = getRegional(items, armRegionName).filter(
     (i) =>
-      /month/i.test(i.unitOfMeasure || '') &&
-      /protected instance/i.test(i.meterName || '')
+      !/bandwidth|data transfer|transfer out|egress|ingress|operations|storage/i.test(
+        i.meterName || ''
+      )
   );
   if (regional.length === 0) return null;
 
@@ -144,19 +146,28 @@ export function findAsrPrice(currency, armRegionName, scenario) {
   if (scenario === 'a2a') {
     candidate =
       regional.find((i) => lower(i.meterName).includes('azure to azure')) ||
+      regional.find((i) => lower(i.meterName).includes('for azure vms')) ||
       regional.find((i) => lower(i.skuName).includes('a2a'));
   } else {
     candidate =
-      regional.find((i) => lower(i.meterName).includes('to azure') && !lower(i.meterName).includes('azure to azure')) ||
-      regional.find((i) => /on.?premises|hyper.?v|vmware|physical/.test(lower(i.meterName)));
+      regional.find(
+        (i) =>
+          lower(i.meterName).includes('to azure') &&
+          !lower(i.meterName).includes('azure to azure') &&
+          !lower(i.meterName).includes('for azure vms')
+      ) ||
+      regional.find((i) => /on.?premises|hyper.?v|vmware|physical/.test(lower(i.meterName))) ||
+      regional.find((i) => lower(i.meterName).includes('protected instance')) ||
+      regional.find((i) => lower(i.meterName).includes('disaster recovery'));
   }
   if (!candidate) candidate = regional[0];
   return candidate
     ? {
         retailPrice: candidate.retailPrice,
-        unitOfMeasure: candidate.unitOfMeasure,
+        unitOfMeasure: candidate.unitOfMeasure, // "1 Hour" or "1/Month"
         meterName: candidate.meterName,
         productName: candidate.productName,
+        skuName: candidate.skuName,
         currency,
       }
     : null;

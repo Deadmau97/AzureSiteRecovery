@@ -20,7 +20,7 @@ import { listTiers, DISK_FAMILIES } from './src/diskTiers.js';
 import { parseRvtoolsBuffer } from './src/rvtools.js';
 import { recommendVms, searchVms } from './src/recommender.js';
 import { estimateProject } from './src/estimator.js';
-import { findDiskPrice } from './src/prices.js';
+import { findDiskPrice, findAsrPrice } from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -107,6 +107,16 @@ app.get('/api/disk-prices', (req, res) => {
     };
   });
   res.json({ region: reg, family: fam, currency: cur, rows });
+});
+
+// Debug: resolved ASR price (and the raw matching meter) for a region/scenario/currency.
+app.get('/api/asr-price', (req, res) => {
+  const region = req.query.region;
+  const scenario = req.query.scenario || 'onprem';
+  const currency = req.query.currency || 'EUR';
+  if (!region) return res.status(400).json({ error: 'region query parameter is required' });
+  const hit = findAsrPrice(currency, region, scenario);
+  res.json({ region, scenario, currency, hit });
 });
 
 const PORT = process.env.PORT || 3000;

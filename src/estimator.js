@@ -50,11 +50,13 @@ export function estimateProject({
     // ---- ASR per-instance protection ----
     const asr = findAsrPrice(currency, armRegionName, scenario === 'a2a' ? 'a2a' : 'onprem');
     if (asr) {
-      const monthly = asr.retailPrice; // unit typically "1/Month"
+      // ASR is normally priced per hour per protected instance — convert to monthly.
+      const isHourly = /hour/i.test(asr.unitOfMeasure || '');
+      const monthly = isHourly ? asr.retailPrice * HOURS_PER_MONTH : asr.retailPrice;
       vmMonthly += monthly;
       lineItems.monthly.push({
         category: 'ASR Protected Instance',
-        detail: asr.meterName,
+        detail: `${asr.meterName} (${asr.unitOfMeasure}${isHourly ? ` × ${HOURS_PER_MONTH}h` : ''})`,
         amount: monthly,
       });
     } else {
