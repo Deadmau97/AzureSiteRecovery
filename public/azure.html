@@ -44,6 +44,7 @@
           <p class="muted">Import from RVTools or add VMs manually. Each VM can use a reservation, Hybrid Benefit and an Azure Backup add-on.</p>
         </div>
         <div class="card-actions">
+          <button class="btn ghost" id="editBackupDefaultsBtn" hidden title="Edit backup defaults">Backup defaults…</button>
           <label class="btn">
             Import RVTools
             <input type="file" id="rvtoolsFile" accept=".xlsx,.xls,.csv" hidden />
@@ -97,6 +98,7 @@
           <button class="icon-btn" id="backupModalClose" aria-label="Close">×</button>
         </header>
         <div class="modal-body">
+          <p class="muted modal-subtitle" id="backupModalSubtitle"></p>
           <label class="field-stacked">
             <span>Policy</span>
             <select id="backupPolicy">

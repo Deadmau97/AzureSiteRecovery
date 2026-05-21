@@ -47,6 +47,10 @@ const state = {
   vms: [],
   storageAccounts: [],
   diskTiers: { 'Standard SSD': [], 'Premium SSD': [] },
+  // Backup defaults are captured the first time the user enables backup on any VM.
+  // null  = never configured — next "Add Backup" click opens the modal to set them.
+  // {...} = remembered; clicking "Add Backup" on an unprotected VM applies them instantly.
+  backupDefaults: null,
   lastEstimate: null,
 };
 
@@ -185,6 +189,7 @@ function applyServiceVisibility() {
     const pip = card.querySelector('.vm-pip').closest('label');
     pip.hidden = !showPip;
   });
+  $('#editBackupDefaultsBtn').hidden = !showBackup || !state.backupDefaults;
 }
 
 // ---------- Toolbar ----------
@@ -198,6 +203,18 @@ function wireToolbar() {
   $('#addStorageBtn').addEventListener('click', () => addStorageAccount());
   $('#estimateBtn').addEventListener('click', runEstimate);
   $('#currencySelect').addEventListener('change', () => pollStatus(true));
+  $('#editBackupDefaultsBtn').addEventListener('click', editBackupDefaults);
+}
+
+function refreshBackupDefaultsBtn() {
+  applyServiceVisibility();
+}
+
+function editBackupDefaults() {
+  // Pseudo-VM target so the modal can reuse its layout. Saving overwrites defaults
+  // without touching any individual VM.
+  const pseudo = { name: 'all VMs', backup: state.backupDefaults && { ...state.backupDefaults, enabled: true }, _refreshBackupUi: () => {} };
+  openBackupModal(pseudo, 'defaults');
 }
 
 // ---------- VM cards ----------
@@ -287,12 +304,12 @@ function renderVmCard(vm) {
 
   for (const d of vm.disks) renderDiskRow(vm, d, disksWrap);
 
-  backupBtn.addEventListener('click', () => openBackupModal(vm));
+  backupBtn.addEventListener('click', () => onBackupButton(vm));
   function refreshBackupUi() {
     if (vm.backup && vm.backup.enabled) {
       backupBtn.classList.add('active');
       backupLabel.textContent = 'Backup configured';
-      backupSummary.textContent = `${vm.backup.policy} · ${vm.backup.retentionDays}d · ${vm.backup.redundancy}`;
+      backupSummary.textContent = `${vm.backup.policy} · ${vm.backup.retentionDays}d · ${vm.backup.redundancy} · click to edit`;
     } else {
       backupBtn.classList.remove('active');
       backupLabel.textContent = 'Add Backup';
@@ -463,6 +480,23 @@ function renderStorageCard(sa) {
 
 // ---------- Backup modal ----------
 let backupTargetVm = null;
+let backupModalMode = 'vm'; // 'vm' = override one VM; 'defaults' = first-time setup
+
+function onBackupButton(vm) {
+  // 1. VM already has its own backup config → open modal to edit/override.
+  if (vm.backup && vm.backup.enabled) {
+    openBackupModal(vm, 'vm');
+    return;
+  }
+  // 2. No global defaults yet → first-time setup. Modal will store defaults + enable this VM.
+  if (!state.backupDefaults) {
+    openBackupModal(vm, 'defaults');
+    return;
+  }
+  // 3. Defaults exist → just enable this VM with a copy of them. No modal.
+  vm.backup = { ...state.backupDefaults, enabled: true };
+  vm._refreshBackupUi?.();
+}
 
 function wireBackupModal() {
   $('#backupModalClose').addEventListener('click', closeBackupModal);
@@ -470,39 +504,64 @@ function wireBackupModal() {
     if (e.target.id === 'backupModal') closeBackupModal();
   });
   $('#backupSaveBtn').addEventListener('click', () => {
-    if (!backupTargetVm) return;
-    backupTargetVm.backup = {
+    const cfg = {
       enabled: true,
       policy: $('#backupPolicy').value,
       retentionDays: Number($('#backupRetention').value) || 30,
       redundancy: $('#backupRedundancy').value,
       dailyChurnPct: Number($('#backupChurn').value) || 5,
     };
-    backupTargetVm._refreshBackupUi?.();
+    if (backupModalMode === 'defaults') {
+      // First-time setup: remember as the global defaults AND enable the originating VM.
+      state.backupDefaults = { ...cfg };
+      delete state.backupDefaults.enabled;
+      refreshBackupDefaultsBtn();
+    }
+    if (backupTargetVm) {
+      backupTargetVm.backup = cfg;
+      backupTargetVm._refreshBackupUi?.();
+    }
     closeBackupModal();
   });
   $('#backupRemoveBtn').addEventListener('click', () => {
-    if (!backupTargetVm) return;
-    backupTargetVm.backup = null;
-    backupTargetVm._refreshBackupUi?.();
+    if (backupTargetVm) {
+      backupTargetVm.backup = null;
+      backupTargetVm._refreshBackupUi?.();
+    }
     closeBackupModal();
+  });
+  // Escape key closes the modal.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('#backupModal').hidden) closeBackupModal();
   });
 }
 
-function openBackupModal(vm) {
+function openBackupModal(vm, mode = 'vm') {
   backupTargetVm = vm;
-  const cfg = vm.backup || { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
-  $('#backupModalVmName').textContent = vm.name;
-  $('#backupPolicy').value = cfg.policy;
-  $('#backupRetention').value = cfg.retentionDays;
-  $('#backupRedundancy').value = cfg.redundancy;
-  $('#backupChurn').value = cfg.dailyChurnPct;
+  backupModalMode = mode;
+  const seed =
+    vm.backup ||
+    state.backupDefaults ||
+    { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
+  $('#backupModalVmName').textContent =
+    mode === 'defaults' ? `Set Backup defaults (→ ${vm.name})` : vm.name;
+  $('#backupModalSubtitle').textContent =
+    mode === 'defaults'
+      ? 'These values will be reused as the default for every VM you enable Backup on. You can override them per VM later.'
+      : 'Override the Backup settings for this VM. Remove to disable Backup on this VM.';
+  $('#backupRemoveBtn').hidden = mode === 'defaults';
+  $('#backupSaveBtn').textContent = mode === 'defaults' ? 'Save defaults & enable' : 'Save';
+  $('#backupPolicy').value = seed.policy;
+  $('#backupRetention').value = seed.retentionDays;
+  $('#backupRedundancy').value = seed.redundancy;
+  $('#backupChurn').value = seed.dailyChurnPct;
   $('#backupModal').hidden = false;
 }
 
 function closeBackupModal() {
   $('#backupModal').hidden = true;
   backupTargetVm = null;
+  backupModalMode = 'vm';
 }
 
 // ---------- Estimate ----------

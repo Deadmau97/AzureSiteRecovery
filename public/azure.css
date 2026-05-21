@@ -219,6 +219,8 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   z-index: 50;
   padding: 20px;
 }
+/* Native [hidden] is overridden by `display: flex` above — force it back. */
+.modal-backdrop[hidden] { display: none; }
 .modal {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -241,6 +243,7 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   display: grid;
   gap: 12px;
 }
+.modal-subtitle { margin: 0 0 4px; font-size: 12px; line-height: 1.5; }
 .field-stacked {
   display: flex;
   flex-direction: column;
