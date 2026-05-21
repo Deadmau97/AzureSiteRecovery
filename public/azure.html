@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Azure Calculator</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/azure.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" title="Back to Cloud Utilities">
+        <span class="dot"></span>
+        <h1>Azure Calculator</h1>
+      </a>
+      <div class="controls">
+        <label class="field-flat">
+          <span>Region</span>
+          <select id="regionSelect"></select>
+        </label>
+        <label class="field-flat">
+          <span>Currency</span>
+          <select id="currencySelect"></select>
+        </label>
+        <button class="btn ghost" id="refreshPricesBtn" title="Re-warm Retail Prices cache">Refresh prices</button>
+        <span class="status-pill" id="statusPill">…</span>
+      </div>
+    </header>
+
+    <!-- Service selector strip -->
+    <section class="services-strip">
+      <h2>Services</h2>
+      <p class="muted">Choose which sections to enable in this estimate.</p>
+      <div class="services-grid" id="servicesGrid">
+        <!-- service tiles injected by JS -->
+      </div>
+    </section>
+
+    <!-- Toolbar: RVTools import + add VM -->
+    <section class="card" id="vmSectionWrapper">
+      <div class="card-head">
+        <div>
+          <h2>Virtual Machines</h2>
+          <p class="muted">Import from RVTools or add VMs manually. Each VM can use a reservation, Hybrid Benefit and an Azure Backup add-on.</p>
+        </div>
+        <div class="card-actions">
+          <label class="btn">
+            Import RVTools
+            <input type="file" id="rvtoolsFile" accept=".xlsx,.xls,.csv" hidden />
+          </label>
+          <button class="btn ghost" id="addVmBtn">+ Add VM</button>
+        </div>
+      </div>
+      <div id="vmList" class="vm-list"></div>
+    </section>
+
+    <!-- Storage accounts -->
+    <section class="card" id="storageSectionWrapper" hidden>
+      <div class="card-head">
+        <div>
+          <h2>Storage Accounts</h2>
+          <p class="muted">Blob storage capacity priced by tier and redundancy.</p>
+        </div>
+        <div class="card-actions">
+          <button class="btn ghost" id="addStorageBtn">+ Add storage account</button>
+        </div>
+      </div>
+      <div id="storageList" class="vm-list"></div>
+    </section>
+
+    <!-- Footer action bar -->
+    <section class="action-bar">
+      <button class="btn primary" id="estimateBtn">Estimate monthly cost</button>
+      <span class="muted" id="estimateMeta"></span>
+    </section>
+
+    <!-- Results -->
+    <section class="card" id="resultsCard" hidden>
+      <div class="card-head">
+        <div>
+          <h2>Monthly estimate</h2>
+          <p class="muted" id="resultsMeta"></p>
+        </div>
+        <div class="card-actions">
+          <span class="grand-total" id="grandTotal">—</span>
+        </div>
+      </div>
+      <div id="resultsBody"></div>
+      <div class="warnings" id="warningsBox" hidden></div>
+    </section>
+
+    <!-- Backup modal -->
+    <div class="modal-backdrop" id="backupModal" hidden>
+      <div class="modal">
+        <header>
+          <h3>Azure Backup — <span id="backupModalVmName">VM</span></h3>
+          <button class="icon-btn" id="backupModalClose" aria-label="Close">×</button>
+        </header>
+        <div class="modal-body">
+          <label class="field-stacked">
+            <span>Policy</span>
+            <select id="backupPolicy">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </label>
+          <label class="field-stacked">
+            <span>Retention (days)</span>
+            <input type="number" id="backupRetention" min="1" max="9999" value="30" />
+          </label>
+          <label class="field-stacked">
+            <span>Storage redundancy</span>
+            <select id="backupRedundancy">
+              <option value="LRS">LRS</option>
+              <option value="GRS" selected>GRS</option>
+              <option value="ZRS">ZRS</option>
+            </select>
+          </label>
+          <label class="field-stacked">
+            <span>Daily churn %</span>
+            <input type="number" id="backupChurn" min="0" max="100" step="0.5" value="5" />
+          </label>
+        </div>
+        <footer>
+          <button class="btn ghost" id="backupRemoveBtn">Remove backup</button>
+          <button class="btn primary" id="backupSaveBtn">Save</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- VM card template -->
+    <template id="vmCardTpl">
+      <div class="vm-card">
+        <div class="vm-head">
+          <input class="vm-name" placeholder="VM name" />
+          <button class="icon-btn-danger vm-remove" title="Remove VM" aria-label="Remove VM">
+            <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="vm-fields">
+          <label class="field-flat"><span>vCPU</span><input type="number" class="vm-vcpu" min="1" value="2" /></label>
+          <label class="field-flat"><span>RAM (GiB)</span><input type="number" class="vm-ram" min="1" value="8" /></label>
+          <label class="field-flat"><span>OS</span>
+            <div class="os-toggle">
+              <button type="button" class="os-btn" data-os="linux" aria-pressed="true" title="Linux">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2c-2 0-3 2-3 4 0 1 0 2 .5 3-1 1-2 3-2 5 0 3 2 6 2 7-1 0-2 1-2 2 0 1 1 1 2 1h5c1 0 2 0 2-1 0-1-1-2-2-2 0-1 2-4 2-7 0-2-1-4-2-5 .5-1 .5-2 .5-3 0-2-1-4-3-4z"/></svg>
+                Linux
+              </button>
+              <button type="button" class="os-btn" data-os="windows" aria-pressed="false" title="Windows">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 5l8-1v8H3zM12 4l9-1v10h-9zM3 13h8v7l-8-1zM12 13h9v9l-9-1z"/></svg>
+                Windows
+              </button>
+            </div>
+          </label>
+          <label class="field-flat"><span>VM SKU</span><select class="vm-sku"></select></label>
+          <label class="field-flat"><span>Reservation</span>
+            <select class="vm-reservation">
+              <option value="payg">Pay-as-you-go</option>
+              <option value="1y">1-Year RI</option>
+              <option value="3y">3-Year RI</option>
+            </select>
+          </label>
+          <label class="field-flat checkbox-flat ahb-label"><input type="checkbox" class="vm-ahb" /><span>Hybrid Benefit</span></label>
+          <label class="field-flat checkbox-flat"><input type="checkbox" class="vm-pip" /><span>Public IP (Std)</span></label>
+        </div>
+        <div class="vm-disks">
+          <div class="vm-disks-head">
+            <strong>Disks</strong>
+            <button type="button" class="btn ghost btn-tiny add-disk">+ Add disk</button>
+          </div>
+          <div class="disk-rows"></div>
+        </div>
+        <div class="vm-foot">
+          <button type="button" class="btn ghost backup-btn">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+            <span class="backup-label">Add Backup</span>
+          </button>
+          <span class="vm-backup-summary muted"></span>
+        </div>
+      </div>
+    </template>
+
+    <template id="diskRowTpl">
+      <div class="disk-row">
+        <select class="disk-family">
+          <option value="Standard SSD" selected>Standard SSD</option>
+          <option value="Premium SSD">Premium SSD</option>
+        </select>
+        <input type="number" class="disk-size" min="1" value="128" />
+        <span class="muted disk-sku">—</span>
+        <input class="disk-role" placeholder="Role (e.g. OS, data)" />
+        <button class="icon-btn-danger disk-remove" title="Remove disk" aria-label="Remove disk">
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </template>
+
+    <template id="storageCardTpl">
+      <div class="vm-card">
+        <div class="vm-head">
+          <input class="sa-name" placeholder="Storage account name" />
+          <button class="icon-btn-danger sa-remove" title="Remove" aria-label="Remove">
+            <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="vm-fields">
+          <label class="field-flat"><span>Tier</span>
+            <select class="sa-tier">
+              <option value="Hot" selected>Hot</option>
+              <option value="Cool">Cool</option>
+              <option value="Archive">Archive</option>
+            </select>
+          </label>
+          <label class="field-flat"><span>Redundancy</span>
+            <select class="sa-redundancy">
+              <option value="LRS" selected>LRS</option>
+              <option value="GRS">GRS</option>
+              <option value="ZRS">ZRS</option>
+            </select>
+          </label>
+          <label class="field-flat"><span>Capacity (GiB)</span><input type="number" class="sa-capacity" min="0" value="100" /></label>
+        </div>
+      </div>
+    </template>
+
+    <script type="module" src="/azure.js"></script>
+  </body>
+</html>

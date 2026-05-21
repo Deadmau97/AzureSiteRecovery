@@ -40,13 +40,16 @@ function regionOr(regions) {
 
 // ---------- Cache shape ----------
 // cache[currency] = {
-//   asr:        Item[],
-//   disks:      Item[],
-//   vms:        Item[],
-//   cacheStore: Item[],
-//   publicIp:   Item[],
-//   bandwidth:  Item[],   // inter-region egress
-//   updatedAt:  Date,
+//   asr:            Item[],
+//   disks:          Item[],
+//   vms:            Item[],   // PAYG (Consumption)
+//   vmReservations: Item[],   // 1Y/3Y reserved instances
+//   cacheStore:     Item[],
+//   publicIp:       Item[],
+//   bandwidth:      Item[],   // inter-region egress
+//   backup:         Item[],   // Azure Backup
+//   blobStorage:    Item[],   // Hot/Cool/Archive blob tiers
+//   updatedAt:      Date,
 // }
 
 const cache = {};
@@ -63,9 +66,12 @@ export function getStatus() {
       asrCount: cache[cur]?.asr?.length || 0,
       diskCount: cache[cur]?.disks?.length || 0,
       vmCount: cache[cur]?.vms?.length || 0,
+      vmReservationCount: cache[cur]?.vmReservations?.length || 0,
       cacheStoreCount: cache[cur]?.cacheStore?.length || 0,
       publicIpCount: cache[cur]?.publicIp?.length || 0,
       bandwidthCount: cache[cur]?.bandwidth?.length || 0,
+      backupCount: cache[cur]?.backup?.length || 0,
+      blobStorageCount: cache[cur]?.blobStorage?.length || 0,
     })),
   };
 }
@@ -91,31 +97,44 @@ export async function warmCache({ verbose = true } = {}) {
       // 6. Bandwidth — inter-region egress. No regionFilter because some bandwidth meters
       // are sold as global SKUs (Zone 1/2/3) without an armRegionName.
       const bandwidthFilter = `serviceName eq 'Bandwidth' and priceType eq 'Consumption'`;
+      // 7. VM Reservations — 1Y/3Y reserved instance prices for the same VMs
+      const vmRiFilter = `serviceName eq 'Virtual Machines' and priceType eq 'Reservation' and ${regionFilter}`;
+      // 8. Azure Backup — protected instance fees + backup storage redundancies
+      const backupFilter = `serviceName eq 'Backup' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 9. Blob Storage — Hot/Cool/Archive tiers + LRS/GRS/ZRS redundancies (data stored)
+      const blobFilter = `serviceName eq 'Storage' and (productName eq 'General Block Blob v2' or productName eq 'Blob Storage' or productName eq 'Archive Blob Storage') and ${regionFilter} and priceType eq 'Consumption'`;
 
-      const [asr, disks, vms, cacheStore, publicIp, bandwidth] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
         fetchAllPages(cacheStoreFilter, currency),
         fetchAllPages(publicIpFilter, currency),
         fetchAllPages(bandwidthFilter, currency, { pageLimit: 20 }),
+        fetchAllPages(vmRiFilter, currency, { pageLimit: 200 }),
+        fetchAllPages(backupFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(blobFilter, currency, { pageLimit: 50 }),
       ]);
 
       cache[currency] = {
         asr,
         disks,
         vms,
+        vmReservations,
         cacheStore,
         publicIp,
         bandwidth,
+        backup,
+        blobStorage,
         updatedAt: new Date(),
       };
 
       if (verbose) {
         console.log(
           `[prices] ${currency} warmed in ${Date.now() - t0}ms ` +
-            `(asr=${asr.length}, disks=${disks.length}, vms=${vms.length}, ` +
-            `cacheStore=${cacheStore.length}, publicIp=${publicIp.length}, bandwidth=${bandwidth.length})`
+            `(asr=${asr.length}, disks=${disks.length}, vms=${vms.length}, vmRI=${vmReservations.length}, ` +
+            `cacheStore=${cacheStore.length}, publicIp=${publicIp.length}, bandwidth=${bandwidth.length}, ` +
+            `backup=${backup.length}, blob=${blobStorage.length})`
         );
       }
     }
@@ -331,6 +350,230 @@ export function findInterRegionEgressPricePerGiB(currency, armRegionName) {
 
 export function vmHourlyToMonthly(hourly) {
   return hourly * HOURS_PER_MONTH;
+}
+
+// ---------- Azure Calculator helpers (compute reservations, backup, blob storage) ----------
+
+const HOURS_PER_YEAR = 8760;
+
+/**
+ * Find the effective hourly price for a VM given a reservation term.
+ * The Retail Prices API returns Reservation items for each (sku, term). The "retailPrice"
+ * is the FULL TERM total (e.g. ~$1100 for a 1Y D2s v3). To compare with PAYG we divide
+ * by the number of hours in the term.
+ *
+ * @param term '1 Year' | '3 Years'
+ */
+export function findVmReservationPrice(currency, armRegionName, armSkuName, os, term) {
+  const items = cache[currency]?.vmReservations || [];
+  const wantWindows = os === 'windows';
+  const pool = items.filter(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      i.armSkuName === armSkuName &&
+      i.reservationTerm === term &&
+      /windows/i.test(i.productName || '') === wantWindows
+  );
+  if (pool.length === 0) return null;
+  const hit = pool[0];
+  // Some entries use unitOfMeasure "1 Hour" with retailPrice already hourly; others use
+  // the term total. Heuristic: if unit contains "Hour" and price is small, treat as hourly;
+  // otherwise divide by term hours.
+  const termHours = term === '3 Years' ? HOURS_PER_YEAR * 3 : HOURS_PER_YEAR;
+  let effectiveHourly;
+  if (/hour/i.test(hit.unitOfMeasure || '') && hit.retailPrice < 5) {
+    effectiveHourly = hit.retailPrice;
+  } else {
+    effectiveHourly = hit.retailPrice / termHours;
+  }
+  return {
+    retailPrice: hit.retailPrice,
+    effectiveHourly,
+    unitOfMeasure: hit.unitOfMeasure,
+    reservationTerm: hit.reservationTerm,
+    productName: hit.productName,
+    skuName: hit.skuName,
+    os: wantWindows ? 'windows' : 'linux',
+    currency,
+  };
+}
+
+/**
+ * Effective hourly price for a VM combining OS, reservation and Hybrid Benefit.
+ * Hybrid Benefit (AHB) on Windows lets you "bring your own" Windows license, so the
+ * effective compute price collapses to the Linux PAYG/RI price for the same SKU.
+ *
+ * @param opts.reservation 'payg' | '1y' | '3y'
+ * @param opts.hybridBenefit boolean
+ */
+export function findVmEffectiveHourly(currency, armRegionName, armSkuName, os, opts = {}) {
+  const reservation = opts.reservation || 'payg';
+  const hybridBenefit = !!opts.hybridBenefit;
+
+  // AHB collapses Windows compute to the Linux rate for the same SKU.
+  const effectiveOs = hybridBenefit && os === 'windows' ? 'linux' : os;
+
+  if (reservation === '1y' || reservation === '3y') {
+    const term = reservation === '3y' ? '3 Years' : '1 Year';
+    const ri = findVmReservationPrice(currency, armRegionName, armSkuName, effectiveOs, term);
+    if (ri) {
+      return {
+        hourly: ri.effectiveHourly,
+        source: 'reservation',
+        reservation,
+        hybridBenefit,
+        os,
+        effectiveOs,
+        detail: `${term} RI \u2013 ${ri.skuName}`,
+        productName: ri.productName,
+        currency,
+      };
+    }
+    // Fall back to PAYG if RI not found.
+  }
+
+  const payg = findVmPrice(currency, armRegionName, armSkuName, effectiveOs);
+  if (!payg) return null;
+  return {
+    hourly: payg.retailPrice,
+    source: 'payg',
+    reservation: 'payg',
+    hybridBenefit,
+    os,
+    effectiveOs,
+    detail: hybridBenefit && os === 'windows' ? 'PAYG (Linux rate, Windows AHB)' : 'PAYG',
+    productName: payg.productName,
+    currency,
+  };
+}
+
+/**
+ * Azure Backup protected instance fee for a given source size.
+ * Microsoft's published schedule (per instance / month):
+ *   - <= 50 GB:        one fee
+ *   - > 50 GB, <= 500: a higher fee
+ *   - every additional 500 GB tranche: same as the 500-GB fee added again
+ *
+ * The API meters are named "Azure VM Backup Protected Instances Size <= 50 GB",
+ * "Azure VM Backup Protected Instances Size > 50 GB to 500 GB", and
+ * "Azure VM Backup Protected Instances Size > 500 GB Multiples" (or similar).
+ *
+ * Returns { monthly, breakdown[] }.
+ */
+export function findBackupProtectedInstanceMonthly(currency, armRegionName, sizeGiB) {
+  const items = cache[currency]?.backup || [];
+  const regional = items.filter(
+    (i) =>
+      (i.armRegionName === armRegionName || !i.armRegionName) &&
+      /protected instance/i.test(i.meterName || '')
+  );
+  if (regional.length === 0) return null;
+
+  const findMeter = (re) => regional.find((i) => re.test(i.meterName || ''));
+  const small = findMeter(/50\s*gb\s*or\s*less|<=?\s*50\s*gb|size\s*0\s*to\s*50/i);
+  const mid = findMeter(/50\s*gb\s*to\s*500\s*gb|>\s*50\s*gb.*500/i);
+  const tranche = findMeter(/500\s*gb\s*multiples|>\s*500\s*gb/i);
+
+  const breakdown = [];
+  let monthly = 0;
+  if (sizeGiB <= 50 && small) {
+    monthly += small.retailPrice;
+    breakdown.push({ tier: '\u2264 50 GiB', amount: small.retailPrice, meterName: small.meterName });
+  } else if (sizeGiB <= 500 && mid) {
+    monthly += mid.retailPrice;
+    breakdown.push({ tier: '> 50 GiB to 500 GiB', amount: mid.retailPrice, meterName: mid.meterName });
+  } else if (sizeGiB > 500) {
+    // Mid bracket counts once for the first 500 GB, then a 500-GB tranche for every additional
+    // 500 GB or part thereof.
+    if (mid) {
+      monthly += mid.retailPrice;
+      breakdown.push({ tier: 'First 500 GiB', amount: mid.retailPrice, meterName: mid.meterName });
+    }
+    if (tranche) {
+      const extra = Math.ceil((sizeGiB - 500) / 500);
+      const cost = tranche.retailPrice * extra;
+      monthly += cost;
+      breakdown.push({
+        tier: `${extra} \u00d7 500 GiB tranches`,
+        amount: cost,
+        unit: tranche.retailPrice,
+        meterName: tranche.meterName,
+      });
+    }
+  } else if (mid) {
+    monthly += mid.retailPrice;
+    breakdown.push({ tier: 'Default', amount: mid.retailPrice, meterName: mid.meterName });
+  }
+
+  return { monthly, breakdown, currency };
+}
+
+/**
+ * Backup Storage per GiB/Month for a given redundancy (LRS|GRS|ZRS).
+ */
+export function findBackupStoragePricePerGiBMonth(currency, armRegionName, redundancy /* 'LRS'|'GRS'|'ZRS' */) {
+  const items = cache[currency]?.backup || [];
+  const want = (redundancy || 'LRS').toLowerCase();
+  const regional = items.filter(
+    (i) =>
+      (i.armRegionName === armRegionName || !i.armRegionName) &&
+      /backup storage/i.test(i.meterName || '') &&
+      /data stored/i.test(i.meterName || '') &&
+      new RegExp(`\\b${want}\\b`, 'i').test(i.meterName + ' ' + (i.skuName || ''))
+  );
+  let hit = regional[0];
+  if (!hit) {
+    // Looser: any backup data-stored meter
+    hit = items.find(
+      (i) =>
+        (i.armRegionName === armRegionName || !i.armRegionName) &&
+        /backup/i.test(i.meterName || '') &&
+        /data stored/i.test(i.meterName || '') &&
+        new RegExp(want, 'i').test(i.meterName + ' ' + (i.skuName || ''))
+    );
+  }
+  return hit
+    ? {
+        retailPrice: hit.retailPrice,
+        unitOfMeasure: hit.unitOfMeasure,
+        meterName: hit.meterName,
+        skuName: hit.skuName,
+        redundancy,
+        currency,
+      }
+    : null;
+}
+
+/**
+ * Blob storage per GiB/Month for a given tier (Hot|Cool|Archive) + redundancy.
+ * Uses the first pricing tranche (\u2264 50 TB / "data stored").
+ */
+export function findBlobStoragePricePerGiBMonth(currency, armRegionName, tier /* 'Hot'|'Cool'|'Archive' */, redundancy /* 'LRS'|'GRS'|'ZRS' */) {
+  const items = cache[currency]?.blobStorage || [];
+  const wantTier = (tier || 'Hot').toLowerCase();
+  const wantRed = (redundancy || 'LRS').toLowerCase();
+  const regional = items.filter(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      /data stored/i.test(i.meterName || '') &&
+      new RegExp(wantTier, 'i').test(i.meterName + ' ' + (i.skuName || '') + ' ' + (i.productName || '')) &&
+      new RegExp(`\\b${wantRed}\\b`, 'i').test(i.meterName + ' ' + (i.skuName || ''))
+  );
+  // Prefer the lowest tranche (smallest "tierMinimumUnits") if present
+  regional.sort((a, b) => (a.tierMinimumUnits || 0) - (b.tierMinimumUnits || 0));
+  const hit = regional[0];
+  return hit
+    ? {
+        retailPrice: hit.retailPrice,
+        unitOfMeasure: hit.unitOfMeasure,
+        meterName: hit.meterName,
+        skuName: hit.skuName,
+        productName: hit.productName,
+        tier,
+        redundancy,
+        currency,
+      }
+    : null;
 }
 
 export { HOURS_PER_MONTH };

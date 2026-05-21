@@ -20,6 +20,7 @@ import { listTiers, DISK_FAMILIES } from './src/diskTiers.js';
 import { parseRvtoolsBuffer } from './src/rvtools.js';
 import { recommendVms, searchVms } from './src/recommender.js';
 import { estimateProject } from './src/estimator.js';
+import { estimateAzure } from './src/azureEstimator.js';
 import { findDiskPrice, findAsrPrice } from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,8 +37,14 @@ app.get('/', (req, res) => {
 app.get(['/asr', '/asr/'], (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+app.get(['/azure', '/azure/'], (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'azure.html'));
+});
 
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+// Serve the SVG icon library at /icons/<category>/<file>.svg so the frontend can
+// reference official Azure service icons directly.
+app.use('/icons', express.static(path.join(__dirname, 'Icons'), { maxAge: '7d' }));
 
 app.get('/api/status', (req, res) => {
   res.json(getStatus());
@@ -82,6 +89,15 @@ app.post('/api/recommend', (req, res) => {
 app.post('/api/estimate', (req, res) => {
   try {
     const result = estimateProject(req.body || {});
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/azure/estimate', (req, res) => {
+  try {
+    const result = estimateAzure(req.body || {});
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

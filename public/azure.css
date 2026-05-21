@@ -1,0 +1,274 @@
+/* Azure Calculator specific styles (extends styles.css) */
+
+main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
+
+/* Services strip ---------------------------------------------------------- */
+.services-strip {
+  padding: 24px 24px 8px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.services-strip h2 { margin: 0 0 4px; font-size: 18px; }
+.services-strip p { margin: 0 0 14px; font-size: 13px; }
+
+.services-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.service-tile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+  text-align: left;
+  color: inherit;
+  font-family: inherit;
+  font-size: 14px;
+}
+.service-tile:hover { background: var(--panel-2); transform: translateY(-1px); }
+.service-tile[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(110,168,255,0.12), rgba(110,168,255,0.04));
+  box-shadow: 0 0 0 1px var(--accent), 0 6px 18px -8px rgba(110, 168, 255, 0.4);
+}
+.service-tile img {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.3));
+}
+.service-tile .st-body { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.service-tile .st-title { font-weight: 600; }
+.service-tile .st-sub { font-size: 11px; color: var(--muted); }
+.service-tile .st-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  font-size: 11px;
+  font-weight: 700;
+}
+.service-tile[aria-pressed="true"] .st-check {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #0b1020;
+}
+
+/* Cards & section heads --------------------------------------------------- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  margin: 16px 24px;
+  max-width: 1400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.card-head h2 { margin: 0 0 2px; font-size: 17px; }
+.card-head p { margin: 0; font-size: 12px; }
+.card-actions { display: flex; gap: 8px; align-items: center; }
+
+/* VM card additions ------------------------------------------------------- */
+.vm-card {
+  opacity: 1;
+  transform: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.vm-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.field-flat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.field-flat > span { font-size: 11px; color: var(--muted); }
+.field-flat input,
+.field-flat select { font-size: 13px; }
+.checkbox-flat { flex-direction: row; align-items: center; gap: 8px; border-bottom: none; }
+.checkbox-flat input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+.ahb-label { transition: opacity .15s ease; }
+.ahb-label.disabled { opacity: 0.4; pointer-events: none; }
+
+.vm-disks {
+  background: rgba(255,255,255,0.02);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.vm-disks-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.vm-disks-head strong { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.disk-rows { display: flex; flex-direction: column; gap: 6px; }
+.disk-row {
+  display: grid;
+  grid-template-columns: 140px 90px 60px 1fr 32px;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.disk-row .disk-sku { font-size: 11px; text-align: center; font-weight: 600; color: var(--accent); }
+.btn-tiny { font-size: 11px; padding: 4px 8px; }
+
+.vm-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+}
+.vm-foot .backup-btn.active {
+  background: linear-gradient(135deg, rgba(70,211,154,0.15), rgba(70,211,154,0.05));
+  border-color: var(--good);
+  color: var(--good);
+}
+.vm-backup-summary { font-size: 11px; }
+
+/* Action bar -------------------------------------------------------------- */
+.action-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  max-width: 1400px;
+  margin: 12px auto;
+}
+
+.status-pill {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.status-pill.ready { color: var(--good); border-color: var(--good); }
+.status-pill.warming { color: var(--warn); border-color: var(--warn); }
+.status-pill.error { color: var(--bad); border-color: var(--bad); }
+
+/* Results ----------------------------------------------------------------- */
+.grand-total {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--accent);
+  background: rgba(110, 168, 255, 0.08);
+  padding: 6px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+}
+.result-vm {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.result-vm-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.result-vm-head .name { font-weight: 600; font-size: 14px; }
+.result-vm-head .total { font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.result-vm-line {
+  display: grid;
+  grid-template-columns: 200px 1fr 110px;
+  gap: 12px;
+  font-size: 12px;
+  padding: 3px 0;
+  color: var(--muted);
+}
+.result-vm-line strong { color: var(--text); }
+.result-vm-line .amount { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* Modal ------------------------------------------------------------------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 22, 0.75);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 20px;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 30px 80px -20px rgba(0,0,0,0.6);
+  overflow: hidden;
+}
+.modal header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.modal header h3 { margin: 0; font-size: 15px; }
+.modal-body {
+  padding: 16px 18px;
+  display: grid;
+  gap: 12px;
+}
+.field-stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.field-stacked > span { font-size: 11px; }
+.field-stacked input,
+.field-stacked select {
+  padding: 8px 10px;
+  font-size: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+}
+.modal footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: rgba(255,255,255,0.02);
+}
+
+@media (max-width: 700px) {
+  .disk-row { grid-template-columns: 1fr 80px 50px 32px; }
+  .disk-row .disk-role { grid-column: 1 / -1; }
+  .result-vm-line { grid-template-columns: 1fr 90px; }
+  .result-vm-line .desc { grid-column: 1 / -1; }
+}
