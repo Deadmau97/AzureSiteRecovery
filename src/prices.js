@@ -510,26 +510,33 @@ export function findBackupProtectedInstanceMonthly(currency, armRegionName, size
 
 /**
  * Backup Storage per GiB/Month for a given redundancy (LRS|GRS|ZRS).
+ *
+ * The API meters under serviceName='Backup' for Azure VM workload storage are named
+ * literally `Standard LRS Data Stored`, `Standard GRS Data Stored`, `Standard ZRS Data
+ * Stored` and `Standard RA-GRS Data Stored` (skuName='Standard'). Earlier we required
+ * the literal phrase "backup storage" in the meter name which never matches, so the
+ * estimator falsely warned that GRS/ZRS pricing was missing for West Europe / Italy
+ * North. We now match by skuName + a strict meterName pattern.
  */
 export function findBackupStoragePricePerGiBMonth(currency, armRegionName, redundancy /* 'LRS'|'GRS'|'ZRS' */) {
   const items = cache[currency]?.backup || [];
-  const want = (redundancy || 'LRS').toLowerCase();
-  const regional = items.filter(
-    (i) =>
-      (i.armRegionName === armRegionName || !i.armRegionName) &&
-      /backup storage/i.test(i.meterName || '') &&
-      /data stored/i.test(i.meterName || '') &&
-      new RegExp(`\\b${want}\\b`, 'i').test(i.meterName + ' ' + (i.skuName || ''))
+  const want = (redundancy || 'LRS').toUpperCase();
+  // Map "GRS" -> match both GRS and (fallback) RA-GRS if pure GRS is not published.
+  const primaryRe = new RegExp(`^Standard\\s+${want}\\s+Data\\s+Stored$`, 'i');
+  const fallbackRe = want === 'GRS' ? /^Standard\s+RA-GRS\s+Data\s+Stored$/i : null;
+
+  const regional = items.filter((i) =>
+    (i.armRegionName === armRegionName || !i.armRegionName) &&
+    (i.skuName || '').toLowerCase() === 'standard'
   );
-  let hit = regional[0];
+  let hit = regional.find((i) => primaryRe.test(i.meterName || ''));
+  if (!hit && fallbackRe) hit = regional.find((i) => fallbackRe.test(i.meterName || ''));
+
   if (!hit) {
-    // Looser: any backup data-stored meter
-    hit = items.find(
-      (i) =>
-        (i.armRegionName === armRegionName || !i.armRegionName) &&
-        /backup/i.test(i.meterName || '') &&
-        /data stored/i.test(i.meterName || '') &&
-        new RegExp(want, 'i').test(i.meterName + ' ' + (i.skuName || ''))
+    // Last-resort generic scan across all Backup items in the region (any sku).
+    hit = items.find((i) =>
+      (i.armRegionName === armRegionName || !i.armRegionName) &&
+      new RegExp(`\\b${want}\\b\\s+Data\\s+Stored$`, 'i').test(i.meterName || '')
     );
   }
   return hit

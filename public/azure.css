@@ -162,6 +162,95 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   border-top: 1px dashed var(--line);
 }
 
+/* Inline disks block inside a VM card ----------------------------------- */
+.disks-block {
+  border-top: 1px dashed var(--line);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.disks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.disks-head h4 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+.disks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.vm-disk-row {
+  display: grid;
+  grid-template-columns: 24px minmax(120px, 1.2fr) 140px 110px 1fr 32px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.vm-disk-row.os-disk {
+  border-color: rgba(110, 168, 255, 0.4);
+  background: linear-gradient(180deg, rgba(110, 168, 255, 0.06), transparent 80%), var(--panel-2);
+}
+.vm-disk-icon { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.vm-disk-row input,
+.vm-disk-row select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.vm-disk-row input.locked {
+  opacity: 0.7;
+  cursor: not-allowed;
+  background: transparent;
+  border-color: transparent;
+  font-weight: 600;
+  color: var(--accent);
+}
+.vm-disk-row input:focus,
+.vm-disk-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(110, 168, 255, 0.15);
+}
+.vm-disk-sku {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .vm-disk-row {
+    grid-template-columns: 24px 1fr 32px;
+    grid-template-areas:
+      "icon label remove"
+      ".    family family"
+      ".    size sku";
+    row-gap: 6px;
+  }
+  .vm-disk-icon { grid-area: icon; }
+  .vm-disk-label { grid-area: label; }
+  .vm-disk-family { grid-area: family; }
+  .vm-disk-size { grid-area: size; }
+  .vm-disk-sku { grid-area: sku; text-align: right; }
+  .vm-disk-remove { grid-area: remove; }
+}
+
 /* Unified field-flat input/select (applies to both inputs and selects) --- */
 .field-flat {
   display: flex;

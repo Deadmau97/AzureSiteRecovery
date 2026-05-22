@@ -39,35 +39,47 @@ export function estimateAzure(input) {
             hybridBenefit: !!row.hybridBenefit,
           });
           if (eff) {
-            const m = eff.hourly * HOURS_PER_MONTH;
+            // Reservations are billed for the full month; PAYG honours the user-defined
+            // uptime so part-time machines are priced realistically.
+            const isPayg = (row.reservation || 'payg') === 'payg';
+            const hours = isPayg
+              ? Math.min(HOURS_PER_MONTH, Math.max(0, Number(row.hoursPerMonth) || HOURS_PER_MONTH))
+              : HOURS_PER_MONTH;
+            const m = eff.hourly * hours;
             monthly += m;
+            const uptimeDetail = isPayg && hours < HOURS_PER_MONTH ? ` @ ${hours}h/mo` : '';
             lineItems.push({
               category: 'Compute',
-              detail: `${row.recommendedVm} \u2014 ${os} \u2014 ${eff.detail}${eff.hybridBenefit && os === 'windows' ? ' (AHB applied)' : ''}`,
+              detail: `${row.recommendedVm} \u2014 ${os} \u2014 ${eff.detail}${eff.hybridBenefit && os === 'windows' ? ' (AHB applied)' : ''}${uptimeDetail}`,
               amount: m,
             });
           } else {
             warnings.push(`No compute price for ${row.recommendedVm} (${os}) in ${armRegionName}/${currency}.`);
           }
         }
-        // Inline OS disk (every VM has exactly one)
-        if (row.osDisk && row.osDisk.sku) {
-          const dp = findDiskPrice(currency, armRegionName, row.osDisk.family, row.osDisk.sku);
+        // Inline disks (index 0 is the OS disk, the rest are data disks added by the user)
+        const disks = Array.isArray(row.disks) ? row.disks : [];
+        disks.forEach((disk, idx) => {
+          if (!disk || !disk.sku) return;
+          const dp = findDiskPrice(currency, armRegionName, disk.family, disk.sku);
           if (dp) {
             monthly += dp.retailPrice;
+            const label = idx === 0 ? 'OS disk' : `Data disk: ${disk.label || `Disk ${idx}`}`;
             lineItems.push({
-              category: 'OS disk',
-              detail: `${row.osDisk.family} ${row.osDisk.sku} (${row.osDisk.sizeGiB} GiB)`,
+              category: label,
+              detail: `${disk.family} ${disk.sku} (${disk.sizeGiB} GiB)`,
               amount: dp.retailPrice,
             });
           } else {
-            warnings.push(`No OS-disk price for ${row.osDisk.family} ${row.osDisk.sku} in ${armRegionName}.`);
+            warnings.push(`No disk price for ${disk.family} ${disk.sku} in ${armRegionName}.`);
           }
-        }
+        });
         break;
       }
 
       case 'disk': {
+        // Standalone disk rows are no longer added via the UI but the estimator still
+        // honours them for backward compatibility (e.g. older payloads).
         if (row.sku) {
           const dp = findDiskPrice(currency, armRegionName, row.family, row.sku);
           if (dp) {

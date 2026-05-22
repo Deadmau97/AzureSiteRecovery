@@ -1,19 +1,14 @@
 // Azure Calculator frontend — row-based model inspired by the official Azure Pricing
-// Calculator. Each user-added service is a row, rendered as its own card and priced
-// independently. Backup rows are linked to a parent VM and inserted right under it.
+// Calculator. Each user-added service is a row. Virtual machines additionally manage
+// their own OS + data disks inline (mirroring the ASR side of this app), and a per-VM
+// "Add Backup" button spawns a linked backup row right under the VM.
 
 const SERVICES = [
   {
     type: 'vm',
     title: 'Virtual Machine',
-    sub: 'Compute + OS disk',
+    sub: 'Compute + OS / data disks',
     icon: '/icons/compute/10021-icon-service-Virtual-Machine.svg',
-  },
-  {
-    type: 'disk',
-    title: 'Managed Disk',
-    sub: 'Extra data disks',
-    icon: '/icons/compute/10032-icon-service-Disks.svg',
   },
   {
     type: 'storage',
@@ -64,8 +59,6 @@ async function init() {
 // ---------- Disclaimer ----------
 function wireDisclaimer() {
   const modal = $('#disclaimerModal');
-  // Sessions remember acceptance so the user is not nagged every time during a session,
-  // but always sees it after a browser restart.
   if (sessionStorage.getItem('azureCalc.disclaimer') === 'accepted') {
     modal.hidden = true;
   }
@@ -206,22 +199,18 @@ function makeRow(type, prefill = {}) {
         os: prefill.os || 'linux',
         recommendedVm: null,
         reservation: 'payg',
+        hoursPerMonth: 730,
         hybridBenefit: false,
-        osDisk: {
-          family: prefill.osDiskFamily || 'Standard SSD',
-          sizeGiB: prefill.osDiskSizeGiB || 128,
+        disks: (prefill.disks && prefill.disks.length
+          ? prefill.disks
+          : [{ label: 'OS disk', family: 'Standard SSD', sizeGiB: 128 }]
+        ).map((d, idx) => ({
+          id: uid(),
+          label: d.label || (idx === 0 ? 'OS disk' : `Data disk ${idx}`),
+          family: d.family || 'Standard SSD',
+          sizeGiB: d.sizeGiB || 128,
           sku: null,
-        },
-      };
-    case 'disk':
-      return {
-        id,
-        type: 'disk',
-        name: prefill.name || `Disk-${countRows('disk') + 1}`,
-        family: prefill.family || 'Standard SSD',
-        sizeGiB: prefill.sizeGiB || 128,
-        sku: null,
-        attachedToVmId: prefill.attachedToVmId || '',
+        })),
       };
     case 'ip':
       return {
@@ -263,7 +252,7 @@ function countRows(type) {
 }
 
 function removeRow(id) {
-  // Removing a VM also removes any child backup rows that reference it.
+  // Removing a VM also removes any backup row that referenced it.
   state.rows = state.rows.filter((r) => r.id !== id && r.parentVmId !== id);
   renderRows();
 }
@@ -274,15 +263,11 @@ function renderRows() {
   list.innerHTML = '';
   for (const row of state.rows) list.appendChild(renderRow(row));
   applyEmptyState();
-  // Update "Attached to" selectors on every disk row so they always see the current
-  // VM list.
-  refreshDiskAttachments();
 }
 
 function renderRow(row) {
   switch (row.type) {
     case 'vm': return renderVmRow(row);
-    case 'disk': return renderDiskRow(row);
     case 'ip': return renderIpRow(row);
     case 'backup': return renderBackupRow(row);
     case 'storage': return renderStorageRow(row);
@@ -299,6 +284,7 @@ function commonWire(card, row) {
   return { nameInput };
 }
 
+// ---------- VM row ----------
 function renderVmRow(row) {
   const card = $('#vmRowTpl').content.firstElementChild.cloneNode(true);
   commonWire(card, row);
@@ -309,40 +295,96 @@ function renderVmRow(row) {
   const resSel = card.querySelector('.vm-reservation');
   const ahb = card.querySelector('.vm-ahb');
   const ahbWrap = card.querySelector('.ahb-wrap');
+  const uptimeWrap = card.querySelector('.vm-uptime-wrap');
+  const uptime = card.querySelector('.vm-uptime');
   const osBtns = $$('.os-btn', card);
-  const dFam = card.querySelector('.vm-osdisk-family');
-  const dSize = card.querySelector('.vm-osdisk-size');
-  const dSku = card.querySelector('.vm-osdisk-sku');
+  const disksList = card.querySelector('.disks-list');
+  const addDiskBtn = card.querySelector('.add-disk-btn');
   const addBackupBtn = card.querySelector('.add-backup-btn');
 
-  vcpu.value = row.vcpu; ram.value = row.ramGiB; resSel.value = row.reservation;
-  ahb.checked = row.hybridBenefit; dFam.value = row.osDisk.family; dSize.value = row.osDisk.sizeGiB;
+  vcpu.value = row.vcpu;
+  ram.value = row.ramGiB;
+  resSel.value = row.reservation;
+  ahb.checked = row.hybridBenefit;
+  uptime.value = row.hoursPerMonth;
   osBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.os === row.os));
   ahbWrap.classList.toggle('disabled', row.os !== 'windows');
-  recomputeOsDiskSku();
+  uptimeWrap.hidden = row.reservation !== 'payg';
 
-  function recomputeOsDiskSku() {
-    const tier = pickDiskTier(row.osDisk.family, row.osDisk.sizeGiB);
-    row.osDisk.sku = tier ? tier.sku : null;
-    dSku.textContent = tier ? tier.sku : '—';
-  }
+  // Render every disk inside the VM card.
+  row.disks.forEach((disk, idx) => disksList.appendChild(renderVmDisk(row, disk, idx)));
 
   vcpu.addEventListener('change', () => { row.vcpu = +vcpu.value || 0; refreshRecommendations(row, skuSel); });
   ram.addEventListener('change', () => { row.ramGiB = +ram.value || 0; refreshRecommendations(row, skuSel); });
-  resSel.addEventListener('change', () => { row.reservation = resSel.value; });
+  resSel.addEventListener('change', () => {
+    row.reservation = resSel.value;
+    uptimeWrap.hidden = row.reservation !== 'payg';
+  });
+  uptime.addEventListener('change', () => {
+    let v = +uptime.value || 0;
+    if (v < 0) v = 0; if (v > 730) v = 730;
+    uptime.value = v;
+    row.hoursPerMonth = v;
+  });
   ahb.addEventListener('change', () => { row.hybridBenefit = ahb.checked; });
   osBtns.forEach((b) => b.addEventListener('click', () => {
     row.os = b.dataset.os;
     osBtns.forEach((o) => o.setAttribute('aria-pressed', o === b));
     ahbWrap.classList.toggle('disabled', row.os !== 'windows');
   }));
-  dFam.addEventListener('change', () => { row.osDisk.family = dFam.value; recomputeOsDiskSku(); });
-  dSize.addEventListener('change', () => { row.osDisk.sizeGiB = +dSize.value || 0; recomputeOsDiskSku(); });
   skuSel.addEventListener('change', () => { row.recommendedVm = skuSel.value || null; });
   addBackupBtn.addEventListener('click', () => onAddBackup(row));
+  addDiskBtn.addEventListener('click', () => {
+    const disk = { id: uid(), label: `Data disk ${row.disks.length}`, family: 'Standard SSD', sizeGiB: 128, sku: null };
+    row.disks.push(disk);
+    disksList.appendChild(renderVmDisk(row, disk, row.disks.length - 1));
+  });
 
   refreshRecommendations(row, skuSel);
   return card;
+}
+
+function renderVmDisk(vm, disk, idx) {
+  const node = $('#vmDiskRowTpl').content.firstElementChild.cloneNode(true);
+  node.dataset.diskId = disk.id;
+  const isOs = idx === 0;
+  const label = node.querySelector('.vm-disk-label');
+  const family = node.querySelector('.vm-disk-family');
+  const size = node.querySelector('.vm-disk-size');
+  const sku = node.querySelector('.vm-disk-sku');
+  const removeBtn = node.querySelector('.vm-disk-remove');
+
+  label.value = disk.label;
+  family.value = disk.family;
+  size.value = disk.sizeGiB;
+
+  // The OS disk cannot be removed nor relabelled (always called "OS disk") so the user
+  // can clearly identify it and so backup math always finds the boot volume.
+  if (isOs) {
+    label.value = 'OS disk';
+    label.readOnly = true;
+    label.classList.add('locked');
+    removeBtn.hidden = true;
+    node.classList.add('os-disk');
+  }
+
+  recomputeSku();
+
+  function recomputeSku() {
+    const t = pickDiskTier(disk.family, disk.sizeGiB);
+    disk.sku = t ? t.sku : null;
+    sku.textContent = t ? t.sku : '—';
+  }
+
+  label.addEventListener('input', () => { if (!isOs) disk.label = label.value; });
+  family.addEventListener('change', () => { disk.family = family.value; recomputeSku(); });
+  size.addEventListener('change', () => { disk.sizeGiB = +size.value || 0; recomputeSku(); });
+  removeBtn.addEventListener('click', () => {
+    if (isOs) return;
+    vm.disks = vm.disks.filter((d) => d.id !== disk.id);
+    node.remove();
+  });
+  return node;
 }
 
 async function refreshRecommendations(row, skuSel) {
@@ -369,39 +411,7 @@ async function refreshRecommendations(row, skuSel) {
   } catch (e) { console.error('recommend error', e); }
 }
 
-function renderDiskRow(row) {
-  const card = $('#diskRowTpl').content.firstElementChild.cloneNode(true);
-  commonWire(card, row);
-  const fam = card.querySelector('.disk-family');
-  const size = card.querySelector('.disk-size');
-  const sku = card.querySelector('.disk-sku');
-  const att = card.querySelector('.disk-attached');
-  fam.value = row.family; size.value = row.sizeGiB;
-  recompute();
-
-  function recompute() {
-    const tier = pickDiskTier(row.family, row.sizeGiB);
-    row.sku = tier ? tier.sku : null;
-    sku.textContent = tier ? tier.sku : '—';
-  }
-  fam.addEventListener('change', () => { row.family = fam.value; recompute(); });
-  size.addEventListener('change', () => { row.sizeGiB = +size.value || 0; recompute(); });
-  att.addEventListener('change', () => { row.attachedToVmId = att.value || ''; });
-  return card;
-}
-
-function refreshDiskAttachments() {
-  const vmOptions = state.rows.filter((r) => r.type === 'vm');
-  $$('.row-card[data-type="disk"]').forEach((card) => {
-    const id = card.dataset.rowId;
-    const row = state.rows.find((r) => r.id === id);
-    if (!row) return;
-    const sel = card.querySelector('.disk-attached');
-    sel.innerHTML = `<option value="">(unattached)</option>` + vmOptions.map((v) => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('');
-    sel.value = row.attachedToVmId || '';
-  });
-}
-
+// ---------- Other row renderers ----------
 function renderIpRow(row) {
   const card = $('#ipRowTpl').content.firstElementChild.cloneNode(true);
   commonWire(card, row);
@@ -444,7 +454,6 @@ function renderStorageRow(row) {
 
 // ---------- Add Backup from a VM ----------
 function onAddBackup(vm) {
-  // Replace any existing backup row pointing at this VM (one backup per VM).
   state.rows = state.rows.filter((r) => !(r.type === 'backup' && r.parentVmId === vm.id));
   const sourceSize = computeVmSourceSize(vm.id);
   const prefill = {
@@ -454,8 +463,6 @@ function onAddBackup(vm) {
   };
 
   if (!state.backupDefaults) {
-    // First-time setup: open the modal so the user picks defaults. After save we add
-    // the row beneath the originating VM.
     openBackupModal('defaults', { vmName: vm.name, onSave: (defaults) => {
       state.backupDefaults = defaults;
       refreshBackupDefaultsBtn();
@@ -469,15 +476,12 @@ function onAddBackup(vm) {
 function computeVmSourceSize(vmId) {
   const vm = state.rows.find((r) => r.id === vmId);
   if (!vm) return 128;
-  let total = vm.osDisk?.sizeGiB || 0;
-  for (const r of state.rows) {
-    if (r.type === 'disk' && r.attachedToVmId === vmId) total += r.sizeGiB || 0;
-  }
+  const total = (vm.disks || []).reduce((s, d) => s + (d.sizeGiB || 0), 0);
   return total || 128;
 }
 
 // ---------- Backup defaults modal ----------
-let backupModalCtx = null; // { mode, onSave }
+let backupModalCtx = null;
 
 function wireBackupModal() {
   $('#backupModalClose').addEventListener('click', closeBackupModal);
@@ -538,15 +542,21 @@ async function onUploadRvtools(e) {
 
   state.rows = [];
   for (const v of r.vms || []) {
-    const totalDisk = (v.disks && v.disks.length ? v.disks : [{ sizeGiB: 128 }])
-      .reduce((s, d) => s + (d.sizeGiB || 0), 0);
+    // The server returns one entry per disk as `{ label, sizeGiB }`. We preserve every
+    // disk as its own row inside the VM card so the user can tune them individually
+    // — same behaviour as the ASR side of this app.
+    const disks = (v.disks && v.disks.length ? v.disks : [{ label: 'OS disk', sizeGiB: 128 }])
+      .map((d, idx) => ({
+        label: idx === 0 ? 'OS disk' : (d.label || `Data disk ${idx}`),
+        family: d.family || 'Standard SSD',
+        sizeGiB: d.sizeGiB || 128,
+      }));
     addRow('vm', {
       name: v.name,
       vcpu: v.vcpu || 2,
       ramGiB: v.ramGiB || 4,
       os: v.os === 'windows' ? 'windows' : 'linux',
-      osDiskFamily: 'Standard SSD',
-      osDiskSizeGiB: totalDisk || 128,
+      disks,
     });
   }
   e.target.value = '';
