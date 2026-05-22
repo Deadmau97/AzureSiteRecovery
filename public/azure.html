@@ -54,32 +54,45 @@
           <select id="currencySelect"></select>
         </label>
         <button class="btn ghost" id="refreshPricesBtn" title="Re-warm Retail Prices cache">Refresh prices</button>
+        <button class="btn primary" id="estimateBtn" title="Calculate monthly cost and view the results page">
+          Calculate &amp; review
+        </button>
         <span class="status-pill" id="statusPill">…</span>
       </div>
     </header>
 
-    <!-- Service add-row strip -->
+    <!-- ================== Main builder view ================== -->
+    <section id="builderView">
+
+    <!-- Service catalog with full-text search -->
     <section class="services-strip">
       <div class="services-strip-head">
         <div>
           <h2>Add a service</h2>
-          <p class="muted">Click a tile to add a configurable row, like in the official Azure Pricing Calculator.</p>
+          <p class="muted">Search the catalog or click a tile. Each selection adds a configurable row below.</p>
         </div>
         <div class="strip-actions">
-          <button class="btn ghost" id="editBackupDefaultsBtn" hidden title="Edit backup defaults">Backup defaults…</button>
+          <button class="btn ghost" id="editDefaultsBtn" title="Configure default values applied to every new row">Default settings…</button>
           <label class="btn">
             Import RVTools
             <input type="file" id="rvtoolsFile" accept=".xlsx,.xls,.csv" hidden />
           </label>
         </div>
       </div>
+      <div class="services-search-wrap">
+        <input id="serviceSearch" type="search" class="services-search" placeholder="Search services (e.g. VPN, NAT, App Service, Storage…)" />
+      </div>
       <div class="services-grid" id="servicesGrid">
         <!-- service tiles injected by JS -->
       </div>
     </section>
 
-    <!-- Unified rows list -->
+    <!-- Unified rows list with global expand/collapse toggle -->
     <section class="rows-section">
+      <div class="rows-toolbar">
+        <h2>Configured items</h2>
+        <button class="btn ghost btn-sm" id="toggleCollapseAllBtn" title="Collapse or expand every row">Collapse all</button>
+      </div>
       <div id="rowsList" class="rows-list"></div>
       <div class="empty-state" id="emptyState">
         <svg viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
@@ -90,63 +103,158 @@
       </div>
     </section>
 
-    <!-- Footer action bar -->
-    <section class="action-bar">
-      <button class="btn primary" id="estimateBtn">Estimate monthly cost</button>
-      <span class="muted" id="estimateMeta"></span>
-    </section>
+    </section><!-- /#builderView -->
 
-    <!-- Results -->
-    <section class="card" id="resultsCard" hidden>
-      <div class="card-head">
-        <div>
-          <h2>Monthly estimate</h2>
-          <p class="muted" id="resultsMeta"></p>
-        </div>
-        <div class="card-actions">
+    <!-- ================== Results view (shown after Calculate) ================== -->
+    <section id="resultsView" hidden>
+      <div class="results-bar">
+        <button class="btn ghost" id="backToBuilderBtn">← Back to builder</button>
+        <div class="results-bar-right">
+          <button class="btn ghost" id="downloadPdfBtn">Download PDF</button>
           <span class="grand-total" id="grandTotal">—</span>
         </div>
       </div>
-      <div id="resultsBody"></div>
-      <div class="warnings" id="warningsBox" hidden></div>
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h2>Monthly estimate</h2>
+            <p class="muted" id="resultsMeta"></p>
+          </div>
+          <div class="card-actions" id="estimateMeta"></div>
+        </div>
+        <div class="warnings" id="warningsBox" hidden></div>
+
+        <div class="charts-row">
+          <div class="chart-card">
+            <h3>Cost by service type</h3>
+            <canvas id="chartByType" height="220"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Top items (monthly)</h3>
+            <canvas id="chartByItem" height="220"></canvas>
+          </div>
+        </div>
+
+        <div id="resultsBody"></div>
+      </section>
     </section>
 
-    <!-- Backup modal -->
-    <div class="modal-backdrop" id="backupModal" hidden>
-      <div class="modal">
+    <!-- ================== Default settings modal ================== -->
+    <div class="modal-backdrop" id="defaultsModal" hidden>
+      <div class="modal modal-wide">
         <header>
-          <h3>Azure Backup — <span id="backupModalVmName">defaults</span></h3>
-          <button class="icon-btn" id="backupModalClose" aria-label="Close">×</button>
+          <h3>Default settings</h3>
+          <button class="icon-btn" id="defaultsModalClose" aria-label="Close">×</button>
         </header>
         <div class="modal-body">
-          <p class="muted modal-subtitle" id="backupModalSubtitle"></p>
-          <label class="field-stacked">
-            <span>Policy</span>
-            <select id="backupPolicy">
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-            </select>
-          </label>
-          <label class="field-stacked">
-            <span>Retention (days)</span>
-            <input type="number" id="backupRetention" min="1" max="9999" value="30" />
-          </label>
-          <label class="field-stacked">
-            <span>Storage redundancy</span>
-            <select id="backupRedundancy">
-              <option value="LRS">LRS</option>
-              <option value="GRS" selected>GRS</option>
-              <option value="ZRS">ZRS</option>
-            </select>
-          </label>
-          <label class="field-stacked">
-            <span>Daily churn %</span>
-            <input type="number" id="backupChurn" min="0" max="100" step="0.5" value="5" />
-          </label>
+          <p class="muted modal-subtitle">
+            These defaults are applied to every <strong>new</strong> row you add. You can still
+            override any value on a specific row card after it has been added.
+          </p>
+
+          <h4 class="modal-section-title">Compute (Virtual Machines)</h4>
+          <div class="modal-grid">
+            <label class="field-stacked">
+              <span>Default reservation</span>
+              <select id="defReservation">
+                <option value="payg">Pay-as-you-go</option>
+                <option value="1y">1-Year RI</option>
+                <option value="3y">3-Year RI</option>
+              </select>
+            </label>
+            <label class="field-stacked">
+              <span>Default uptime (hours/mo, PAYG only)</span>
+              <input type="number" id="defUptime" min="0" max="730" value="730" />
+            </label>
+            <label class="field-stacked toggle-row">
+              <span>Hybrid Benefit on (Windows VMs)</span>
+              <label class="switch"><input type="checkbox" id="defHybridBenefit" /><span class="slider"></span></label>
+            </label>
+            <label class="field-stacked">
+              <span>Default OS</span>
+              <select id="defOs">
+                <option value="linux">Linux</option>
+                <option value="windows">Windows</option>
+              </select>
+            </label>
+          </div>
+
+          <h4 class="modal-section-title">Disks</h4>
+          <div class="modal-grid">
+            <label class="field-stacked">
+              <span>Default OS disk family</span>
+              <select id="defOsDiskFamily">
+                <option value="Standard SSD">Standard SSD</option>
+                <option value="Premium SSD">Premium SSD</option>
+              </select>
+            </label>
+            <label class="field-stacked">
+              <span>Default OS disk size (GiB)</span>
+              <input type="number" id="defOsDiskSize" min="1" value="128" />
+            </label>
+            <label class="field-stacked">
+              <span>Default data disk family</span>
+              <select id="defDataDiskFamily">
+                <option value="Standard SSD">Standard SSD</option>
+                <option value="Premium SSD">Premium SSD</option>
+              </select>
+            </label>
+            <label class="field-stacked">
+              <span>Default data disk size (GiB)</span>
+              <input type="number" id="defDataDiskSize" min="1" value="128" />
+            </label>
+          </div>
+
+          <h4 class="modal-section-title">Azure Backup</h4>
+          <div class="modal-grid">
+            <label class="field-stacked">
+              <span>Policy</span>
+              <select id="defBackupPolicy">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </label>
+            <label class="field-stacked">
+              <span>Retention (days)</span>
+              <input type="number" id="defBackupRetention" min="1" max="9999" value="30" />
+            </label>
+            <label class="field-stacked">
+              <span>Redundancy</span>
+              <select id="defBackupRedundancy">
+                <option value="LRS">LRS</option>
+                <option value="GRS" selected>GRS</option>
+                <option value="ZRS">ZRS</option>
+              </select>
+            </label>
+            <label class="field-stacked">
+              <span>Daily churn %</span>
+              <input type="number" id="defBackupChurn" min="0" max="100" step="0.5" value="5" />
+            </label>
+          </div>
+
+          <h4 class="modal-section-title">Blob Storage</h4>
+          <div class="modal-grid">
+            <label class="field-stacked">
+              <span>Default tier</span>
+              <select id="defBlobTier">
+                <option value="Hot" selected>Hot</option>
+                <option value="Cool">Cool</option>
+                <option value="Archive">Archive</option>
+              </select>
+            </label>
+            <label class="field-stacked">
+              <span>Default redundancy</span>
+              <select id="defBlobRedundancy">
+                <option value="LRS" selected>LRS</option>
+                <option value="GRS">GRS</option>
+                <option value="ZRS">ZRS</option>
+              </select>
+            </label>
+          </div>
         </div>
         <footer>
-          <button class="btn ghost" id="backupRemoveBtn" hidden>Remove</button>
-          <button class="btn primary" id="backupSaveBtn">Save</button>
+          <button class="btn ghost" id="defaultsResetBtn">Reset to factory</button>
+          <button class="btn primary" id="defaultsSaveBtn">Save defaults</button>
         </footer>
       </div>
     </div>
@@ -157,6 +265,9 @@
     <template id="vmRowTpl">
       <article class="row-card" data-type="vm">
         <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
           <img class="row-icon" src="/icons/compute/10021-icon-service-Virtual-Machine.svg" alt="VM" />
           <input class="field-flat row-name" placeholder="Virtual machine name" />
           <span class="row-cost muted">—</span>
@@ -164,54 +275,72 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
           </button>
         </header>
-        <div class="row-fields">
-          <label class="field-flat"><span>vCPU</span><input type="number" class="vm-vcpu" min="1" value="2" /></label>
-          <label class="field-flat"><span>RAM (GiB)</span><input type="number" class="vm-ram" min="1" value="8" /></label>
-          <label class="field-flat"><span>OS</span>
-            <div class="os-toggle" role="group" aria-label="Operating system">
-              <button type="button" class="os-btn" data-os="linux" aria-pressed="true" title="Linux">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M12 2c-2 0-3 2-3 4 0 1 0 2 .5 3-1 1-2 3-2 5 0 3 2 6 2 7-1 0-2 1-2 2 0 1 1 1 2 1h5c1 0 2 0 2-1 0-1-1-2-2-2 0-1 2-4 2-7 0-2-1-4-2-5 .5-1 .5-2 .5-3 0-2-1-4-3-4z"/></svg>
-                <span class="sr-only">Linux</span>
-              </button>
-              <button type="button" class="os-btn" data-os="windows" aria-pressed="false" title="Windows">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M3 5l8-1v8H3zM12 4l9-1v10h-9zM3 13h8v7l-8-1zM12 13h9v9l-9-1z"/></svg>
-                <span class="sr-only">Windows</span>
-              </button>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>vCPU</span><input type="number" class="vm-vcpu" min="1" value="2" /></label>
+            <label class="field-flat"><span>RAM (GiB)</span><input type="number" class="vm-ram" min="1" value="8" /></label>
+            <label class="field-flat"><span>OS</span>
+              <div class="os-toggle" role="group" aria-label="Operating system">
+                <button type="button" class="os-btn" data-os="linux" aria-pressed="true" title="Linux">
+                  <svg viewBox="0 0 32 32" aria-hidden="true">
+                    <ellipse cx="16" cy="21" rx="8" ry="8.5" fill="#1a1a1a"/>
+                    <ellipse cx="16" cy="22" rx="5" ry="6" fill="#ffffff"/>
+                    <ellipse cx="16" cy="11" rx="6" ry="6.5" fill="#1a1a1a"/>
+                    <ellipse cx="13.5" cy="10" rx="1.7" ry="2.1" fill="#ffffff"/>
+                    <ellipse cx="18.5" cy="10" rx="1.7" ry="2.1" fill="#ffffff"/>
+                    <circle cx="13.7" cy="10.4" r="0.9" fill="#000"/>
+                    <circle cx="18.3" cy="10.4" r="0.9" fill="#000"/>
+                    <path d="M14 13 Q16 14.5 18 13 L17 15.5 Q16 16.2 15 15.5 Z" fill="#f5a623"/>
+                    <ellipse cx="12" cy="29" rx="3.2" ry="1.6" fill="#f5a623"/>
+                    <ellipse cx="20" cy="29" rx="3.2" ry="1.6" fill="#f5a623"/>
+                  </svg>
+                  <span class="sr-only">Linux</span>
+                </button>
+                <button type="button" class="os-btn" data-os="windows" aria-pressed="false" title="Windows">
+                  <svg viewBox="0 0 32 32" aria-hidden="true">
+                    <rect x="3" y="4" width="12" height="12" rx="1" fill="#f25022"/>
+                    <rect x="17" y="4" width="12" height="12" rx="1" fill="#7fba00"/>
+                    <rect x="3" y="18" width="12" height="12" rx="1" fill="#00a4ef"/>
+                    <rect x="17" y="18" width="12" height="12" rx="1" fill="#ffb900"/>
+                  </svg>
+                  <span class="sr-only">Windows</span>
+                </button>
+              </div>
+            </label>
+            <label class="field-flat"><span>VM SKU</span><select class="vm-sku"></select></label>
+            <label class="field-flat"><span>Reservation</span>
+              <select class="vm-reservation">
+                <option value="payg">Pay-as-you-go</option>
+                <option value="1y">1-Year RI</option>
+                <option value="3y">3-Year RI</option>
+              </select>
+            </label>
+            <label class="field-flat vm-uptime-wrap"><span>Uptime (hours/mo)</span>
+              <input type="number" class="vm-uptime" min="0" max="730" value="730" />
+              <small class="muted">Max 730 (24×7). Reservations are always full-month.</small>
+            </label>
+            <div class="field-flat toggle-row ahb-wrap">
+              <span>Hybrid Benefit</span>
+              <label class="switch"><input type="checkbox" class="vm-ahb" /><span class="slider"></span></label>
             </div>
-          </label>
-          <label class="field-flat"><span>VM SKU</span><select class="vm-sku"></select></label>
-          <label class="field-flat"><span>Reservation</span>
-            <select class="vm-reservation">
-              <option value="payg">Pay-as-you-go</option>
-              <option value="1y">1-Year RI</option>
-              <option value="3y">3-Year RI</option>
-            </select>
-          </label>
-          <label class="field-flat vm-uptime-wrap"><span>Uptime (hours/mo)</span>
-            <input type="number" class="vm-uptime" min="0" max="730" value="730" />
-            <small class="muted">Max 730 (24×7). Reservations are always full-month.</small>
-          </label>
-          <div class="field-flat toggle-row ahb-wrap">
-            <span>Hybrid Benefit</span>
-            <label class="switch"><input type="checkbox" class="vm-ahb" /><span class="slider"></span></label>
           </div>
-        </div>
-        <section class="disks-block">
-          <header class="disks-head">
-            <h4>Disks</h4>
-            <button type="button" class="btn ghost btn-sm add-disk-btn">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-              Add data disk
+          <section class="disks-block">
+            <header class="disks-head">
+              <h4>Disks</h4>
+              <button type="button" class="btn ghost btn-sm add-disk-btn">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                Add data disk
+              </button>
+            </header>
+            <div class="disks-list"></div>
+          </section>
+          <footer class="row-foot">
+            <button type="button" class="btn ghost btn-sm add-backup-btn">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+              Add Backup
             </button>
-          </header>
-          <div class="disks-list"></div>
-        </section>
-        <footer class="row-foot">
-          <button type="button" class="btn ghost btn-sm add-backup-btn">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
-            Add Backup
-          </button>
-        </footer>
+          </footer>
+        </div>
       </article>
     </template>
 
@@ -238,6 +367,9 @@
     <template id="ipRowTpl">
       <article class="row-card" data-type="ip">
         <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
           <img class="row-icon" src="/icons/networking/10069-icon-service-Public-IP-Addresses.svg" alt="Public IP" />
           <input class="field-flat row-name" placeholder="Public IP name" />
           <span class="row-cost muted">—</span>
@@ -245,9 +377,11 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
           </button>
         </header>
-        <div class="row-fields">
-          <label class="field-flat"><span>Count</span><input type="number" class="ip-count" min="1" value="1" /></label>
-          <span class="field-flat note"><span>SKU</span><span class="muted">Standard Static IPv4</span></span>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>Count</span><input type="number" class="ip-count" min="1" value="1" /></label>
+            <span class="field-flat note"><span>SKU</span><span class="muted">Standard Static IPv4</span></span>
+          </div>
         </div>
       </article>
     </template>
@@ -256,6 +390,9 @@
     <template id="backupRowTpl">
       <article class="row-card row-backup" data-type="backup">
         <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
           <img class="row-icon" src="/icons/storage/00017-icon-service-Recovery-Services-Vaults.svg" alt="Backup" />
           <input class="field-flat row-name" placeholder="Backup name" />
           <span class="row-cost muted">—</span>
@@ -263,23 +400,25 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
           </button>
         </header>
-        <div class="row-fields">
-          <label class="field-flat"><span>Source size (GiB)</span><input type="number" class="bk-size" min="1" value="128" /></label>
-          <label class="field-flat"><span>Policy</span>
-            <select class="bk-policy">
-              <option value="daily" selected>Daily</option>
-              <option value="weekly">Weekly</option>
-            </select>
-          </label>
-          <label class="field-flat"><span>Retention (days)</span><input type="number" class="bk-retention" min="1" value="30" /></label>
-          <label class="field-flat"><span>Redundancy</span>
-            <select class="bk-redundancy">
-              <option value="LRS">LRS</option>
-              <option value="GRS" selected>GRS</option>
-              <option value="ZRS">ZRS</option>
-            </select>
-          </label>
-          <label class="field-flat"><span>Daily churn %</span><input type="number" class="bk-churn" min="0" max="100" step="0.5" value="5" /></label>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>Source size (GiB)</span><input type="number" class="bk-size" min="1" value="128" /></label>
+            <label class="field-flat"><span>Policy</span>
+              <select class="bk-policy">
+                <option value="daily" selected>Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </label>
+            <label class="field-flat"><span>Retention (days)</span><input type="number" class="bk-retention" min="1" value="30" /></label>
+            <label class="field-flat"><span>Redundancy</span>
+              <select class="bk-redundancy">
+                <option value="LRS">LRS</option>
+                <option value="GRS" selected>GRS</option>
+                <option value="ZRS">ZRS</option>
+              </select>
+            </label>
+            <label class="field-flat"><span>Daily churn %</span><input type="number" class="bk-churn" min="0" max="100" step="0.5" value="5" /></label>
+          </div>
         </div>
       </article>
     </template>
@@ -288,6 +427,9 @@
     <template id="storageRowTpl">
       <article class="row-card" data-type="storage">
         <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
           <img class="row-icon" src="/icons/storage/10086-icon-service-Storage-Accounts.svg" alt="Storage account" />
           <input class="field-flat row-name" placeholder="Storage account name" />
           <span class="row-cost muted">—</span>
@@ -295,26 +437,101 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
           </button>
         </header>
-        <div class="row-fields">
-          <label class="field-flat"><span>Tier</span>
-            <select class="sa-tier">
-              <option value="Hot" selected>Hot</option>
-              <option value="Cool">Cool</option>
-              <option value="Archive">Archive</option>
-            </select>
-          </label>
-          <label class="field-flat"><span>Redundancy</span>
-            <select class="sa-redundancy">
-              <option value="LRS" selected>LRS</option>
-              <option value="GRS">GRS</option>
-              <option value="ZRS">ZRS</option>
-            </select>
-          </label>
-          <label class="field-flat"><span>Capacity (GiB)</span><input type="number" class="sa-capacity" min="0" value="100" /></label>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>Tier</span>
+              <select class="sa-tier">
+                <option value="Hot" selected>Hot</option>
+                <option value="Cool">Cool</option>
+                <option value="Archive">Archive</option>
+              </select>
+            </label>
+            <label class="field-flat"><span>Redundancy</span>
+              <select class="sa-redundancy">
+                <option value="LRS" selected>LRS</option>
+                <option value="GRS">GRS</option>
+                <option value="ZRS">ZRS</option>
+              </select>
+            </label>
+            <label class="field-flat"><span>Capacity (GiB)</span><input type="number" class="sa-capacity" min="0" value="100" /></label>
+          </div>
         </div>
       </article>
     </template>
 
+    <!-- VPN Gateway row -->
+    <template id="vpnRowTpl">
+      <article class="row-card" data-type="vpn">
+        <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <img class="row-icon" src="/icons/networking/10063-icon-service-Virtual-Network-Gateways.svg" alt="VPN Gateway" />
+          <input class="field-flat row-name" placeholder="VPN Gateway name" />
+          <span class="row-cost muted">—</span>
+          <button class="icon-btn row-remove" title="Remove" aria-label="Remove">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+          </button>
+        </header>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>SKU</span><select class="vpn-sku"></select></label>
+            <span class="field-flat note"><span>Billing</span><span class="muted">Hourly × 730</span></span>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <!-- NAT Gateway row -->
+    <template id="natRowTpl">
+      <article class="row-card" data-type="nat">
+        <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <img class="row-icon" src="/icons/networking/10310-icon-service-NAT.svg" alt="NAT Gateway" />
+          <input class="field-flat row-name" placeholder="NAT Gateway name" />
+          <span class="row-cost muted">—</span>
+          <button class="icon-btn row-remove" title="Remove" aria-label="Remove">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+          </button>
+        </header>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>Data processed (GiB/mo)</span><input type="number" class="nat-data" min="0" value="100" /></label>
+            <span class="field-flat note"><span>Billing</span><span class="muted">Hourly fee + data</span></span>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <!-- App Service Plan row -->
+    <template id="appserviceRowTpl">
+      <article class="row-card" data-type="appservice">
+        <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <img class="row-icon" src="/icons/compute/10035-icon-service-App-Services.svg" alt="App Service Plan" />
+          <input class="field-flat row-name" placeholder="App Service Plan name" />
+          <span class="row-cost muted">—</span>
+          <button class="icon-btn row-remove" title="Remove" aria-label="Remove">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+          </button>
+        </header>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat"><span>SKU</span><select class="app-sku"></select></label>
+            <label class="field-flat"><span>Instances</span><input type="number" class="app-instances" min="1" value="1" /></label>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <!-- External libraries: Chart.js for graphs, pdfmake for PDF export -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.10/pdfmake.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.10/vfs_fonts.js"></script>
     <script type="module" src="/azure.js"></script>
   </body>
 </html>

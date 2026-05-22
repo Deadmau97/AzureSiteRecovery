@@ -10,6 +10,9 @@ import {
   findBackupProtectedInstanceMonthly,
   findBackupStoragePricePerGiBMonth,
   findBlobStoragePricePerGiBMonth,
+  findVpnGatewayPrice,
+  findNatGatewayPrice,
+  findAppServicePlanPrice,
   HOURS_PER_MONTH,
 } from './prices.js';
 
@@ -165,6 +168,69 @@ export function estimateAzure(input) {
           });
         } else if (!sp) {
           warnings.push(`No ${row.tier}/${row.redundancy} blob storage price for ${armRegionName}/${currency}.`);
+        }
+        break;
+      }
+
+      case 'vpn': {
+        if (row.skuName) {
+          const p = findVpnGatewayPrice(currency, armRegionName, row.skuName);
+          if (p) {
+            const m = p.retailPrice * HOURS_PER_MONTH;
+            monthly += m;
+            lineItems.push({
+              category: 'VPN Gateway',
+              detail: `${row.skuName} \u2014 ${HOURS_PER_MONTH}h/mo`,
+              amount: m,
+            });
+          } else {
+            warnings.push(`No VPN Gateway price for ${row.skuName} in ${armRegionName}/${currency}.`);
+          }
+        }
+        break;
+      }
+
+      case 'nat': {
+        const { hour, data } = findNatGatewayPrice(currency, armRegionName);
+        if (hour) {
+          const m = hour.retailPrice * HOURS_PER_MONTH;
+          monthly += m;
+          lineItems.push({
+            category: 'NAT Gateway',
+            detail: `Hourly fee \u00d7 ${HOURS_PER_MONTH}h`,
+            amount: m,
+          });
+        } else {
+          warnings.push(`No NAT Gateway hourly price for ${armRegionName}/${currency}.`);
+        }
+        const dataGiB = Math.max(0, Number(row.dataProcessedGiB) || 0);
+        if (data && dataGiB > 0) {
+          const m = data.retailPrice * dataGiB;
+          monthly += m;
+          lineItems.push({
+            category: 'NAT data processed',
+            detail: `${dataGiB} GiB`,
+            amount: m,
+          });
+        }
+        break;
+      }
+
+      case 'appservice': {
+        if (row.productName && row.skuName) {
+          const p = findAppServicePlanPrice(currency, armRegionName, row.productName, row.skuName);
+          if (p) {
+            const instances = Math.max(1, Number(row.instances) || 1);
+            const m = p.retailPrice * HOURS_PER_MONTH * instances;
+            monthly += m;
+            lineItems.push({
+              category: 'App Service Plan',
+              detail: `${row.productName} \u2014 ${row.skuName} \u00d7 ${instances}`,
+              amount: m,
+            });
+          } else {
+            warnings.push(`No App Service Plan price for ${row.productName}/${row.skuName} in ${armRegionName}/${currency}.`);
+          }
         }
         break;
       }

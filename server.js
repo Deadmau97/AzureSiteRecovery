@@ -21,7 +21,12 @@ import { parseRvtoolsBuffer } from './src/rvtools.js';
 import { recommendVms, searchVms } from './src/recommender.js';
 import { estimateProject } from './src/estimator.js';
 import { estimateAzure } from './src/azureEstimator.js';
-import { findDiskPrice, findAsrPrice } from './src/prices.js';
+import {
+  findDiskPrice,
+  findAsrPrice,
+  listVpnGatewaySkus,
+  listAppServicePlanSkus,
+} from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -108,6 +113,21 @@ app.post('/api/refresh-prices', async (req, res) => {
   // Fire-and-forget; client polls /api/status
   warmCache().catch((e) => console.error('refresh error', e));
   res.json({ started: true });
+});
+
+// SKU listers for the Azure Calculator's service catalog. The frontend uses these
+// to populate dropdowns for VPN Gateway and App Service Plan when the user adds
+// the corresponding row.
+app.get('/api/azure/vpn-skus', (req, res) => {
+  const { region, currency } = req.query;
+  if (!region) return res.status(400).json({ error: 'region is required' });
+  res.json(listVpnGatewaySkus(currency || 'EUR', region));
+});
+
+app.get('/api/azure/appservice-skus', (req, res) => {
+  const { region, currency } = req.query;
+  if (!region) return res.status(400).json({ error: 'region is required' });
+  res.json(listAppServicePlanSkus(currency || 'EUR', region));
 });
 
 // Debug: resolved monthly price for every disk tier in a region.

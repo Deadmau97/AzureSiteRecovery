@@ -1,36 +1,85 @@
-// Azure Calculator frontend — row-based model inspired by the official Azure Pricing
-// Calculator. Each user-added service is a row. Virtual machines additionally manage
-// their own OS + data disks inline (mirroring the ASR side of this app), and a per-VM
-// "Add Backup" button spawns a linked backup row right under the VM.
+// Azure Calculator frontend — row-based model with searchable service catalog,
+// global default settings, collapsible rows, dedicated results page (PDF + charts),
+// and support for VPN Gateway / NAT Gateway / App Service Plan in addition to
+// Virtual Machines, Public IPs, Storage Accounts and per-VM Backup.
 
-const SERVICES = [
+// ---------- Service catalog ----------
+// Each entry: { type, title, sub, icon, keywords[] }
+// The catalog feeds both the tile grid and the search box. `keywords` are the
+// extra terms the user might type that should still match the tile.
+const CATALOG = [
   {
     type: 'vm',
     title: 'Virtual Machine',
     sub: 'Compute + OS / data disks',
     icon: '/icons/compute/10021-icon-service-Virtual-Machine.svg',
+    keywords: ['vm', 'compute', 'instance', 'iaas', 'server'],
   },
   {
     type: 'storage',
     title: 'Storage Account',
-    sub: 'Blob (Hot/Cool/Archive)',
+    sub: 'Blob — Hot/Cool/Archive, LRS/GRS/ZRS',
     icon: '/icons/storage/10086-icon-service-Storage-Accounts.svg',
+    keywords: ['blob', 'storage', 'account', 'bucket', 'object'],
   },
   {
     type: 'ip',
     title: 'Public IP',
     sub: 'Standard Static IPv4',
     icon: '/icons/networking/10069-icon-service-Public-IP-Addresses.svg',
+    keywords: ['public', 'ip', 'network', 'ipv4', 'ipv6'],
+  },
+  {
+    type: 'vpn',
+    title: 'VPN Gateway',
+    sub: 'Site-to-site VPN connectivity',
+    icon: '/icons/networking/10063-icon-service-Virtual-Network-Gateways.svg',
+    keywords: ['vpn', 'gateway', 's2s', 'site to site', 'network'],
+  },
+  {
+    type: 'nat',
+    title: 'NAT Gateway',
+    sub: 'Outbound SNAT for subnets',
+    icon: '/icons/networking/10310-icon-service-NAT.svg',
+    keywords: ['nat', 'outbound', 'snat', 'egress', 'network'],
+  },
+  {
+    type: 'appservice',
+    title: 'App Service Plan',
+    sub: 'Managed web/app hosting',
+    icon: '/icons/compute/10035-icon-service-App-Services.svg',
+    keywords: ['app service', 'web app', 'function', 'paas', 'hosting'],
   },
 ];
+
+// ---------- Defaults (applied to every new row, overridable per-row) ----------
+const FACTORY_DEFAULTS = {
+  reservation: 'payg',
+  uptimeHours: 730,
+  hybridBenefit: false,
+  os: 'linux',
+  osDiskFamily: 'Standard SSD',
+  osDiskSize: 128,
+  dataDiskFamily: 'Standard SSD',
+  dataDiskSize: 128,
+  backupPolicy: 'daily',
+  backupRetention: 30,
+  backupRedundancy: 'GRS',
+  backupChurn: 5,
+  blobTier: 'Hot',
+  blobRedundancy: 'LRS',
+};
 
 const state = {
   region: null,
   currency: 'EUR',
   rows: [],
   diskTiers: { 'Standard SSD': [], 'Premium SSD': [] },
-  backupDefaults: null,
+  vpnSkus: [],
+  appServiceSkus: [],
+  defaults: loadDefaults(),
   lastEstimate: null,
+  collapsedAll: false,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -49,9 +98,11 @@ init();
 async function init() {
   wireDisclaimer();
   await Promise.all([loadRegions(), loadCurrencies(), loadDiskTiers()]);
+  await loadServiceCatalogs();
   renderServices();
   wireToolbar();
-  wireBackupModal();
+  wireDefaultsModal();
+  wireResultsView();
   pollStatus();
   applyEmptyState();
 }
@@ -81,7 +132,10 @@ async function loadRegions() {
   }
   state.region = r[0].armRegionName;
   sel.value = state.region;
-  sel.addEventListener('change', () => (state.region = sel.value));
+  sel.addEventListener('change', async () => {
+    state.region = sel.value;
+    await loadServiceCatalogs();
+  });
 }
 
 async function loadCurrencies() {
@@ -96,7 +150,11 @@ async function loadCurrencies() {
   }
   state.currency = c[0];
   sel.value = state.currency;
-  sel.addEventListener('change', () => (state.currency = sel.value));
+  sel.addEventListener('change', async () => {
+    state.currency = sel.value;
+    await loadServiceCatalogs();
+    pollStatus();
+  });
 }
 
 async function loadDiskTiers() {
@@ -106,6 +164,22 @@ async function loadDiskTiers() {
   ]);
   state.diskTiers['Standard SSD'] = std;
   state.diskTiers['Premium SSD'] = prem;
+}
+
+async function loadServiceCatalogs() {
+  // SKU lists for region-bound services. Fetched on region/currency change so the
+  // dropdowns inside VPN / App Service rows always reflect the current selection.
+  if (!state.region) return;
+  try {
+    const [vpn, app] = await Promise.all([
+      fetch(`/api/azure/vpn-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
+      fetch(`/api/azure/appservice-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
+    ]);
+    state.vpnSkus = vpn;
+    state.appServiceSkus = app;
+  } catch (e) {
+    console.error('catalog fetch failed', e);
+  }
 }
 
 function pickDiskTier(family, sizeGiB) {
@@ -126,7 +200,7 @@ async function pollStatus() {
       pill.className = 'status-pill error';
     } else {
       const cur = s.currencies.find((c) => c.currency === state.currency);
-      pill.textContent = cur ? `VMs ${cur.vmCount} · Disks ${cur.diskCount} · Backup ${cur.backupCount}` : 'Ready';
+      pill.textContent = cur ? `VMs ${cur.vmCount} · Disks ${cur.diskCount} · VPN ${cur.vpnGatewayCount} · AppSvc ${cur.appServicePlanCount}` : 'Ready';
       pill.className = 'status-pill ready';
     }
   } catch {
@@ -135,11 +209,24 @@ async function pollStatus() {
   }
 }
 
-// ---------- Service add-row strip ----------
-function renderServices() {
+// ---------- Service catalog rendering + search ----------
+function renderServices(filter = '') {
   const grid = $('#servicesGrid');
   grid.innerHTML = '';
-  for (const svc of SERVICES) {
+  const q = (filter || '').trim().toLowerCase();
+  const matches = CATALOG.filter((svc) => {
+    if (!q) return true;
+    const hay = [svc.title, svc.sub, svc.type, ...(svc.keywords || [])].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  if (matches.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'services-empty muted';
+    empty.textContent = `No service matches "${filter}".`;
+    grid.appendChild(empty);
+    return;
+  }
+  for (const svc of matches) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'service-tile';
@@ -162,15 +249,99 @@ function wireToolbar() {
   $('#refreshPricesBtn').addEventListener('click', async () => {
     await fetch('/api/refresh-prices', { method: 'POST' });
     pollStatus();
+    setTimeout(loadServiceCatalogs, 2000);
   });
   $('#rvtoolsFile').addEventListener('change', onUploadRvtools);
   $('#estimateBtn').addEventListener('click', runEstimate);
-  $('#currencySelect').addEventListener('change', pollStatus);
-  $('#editBackupDefaultsBtn').addEventListener('click', editBackupDefaults);
+  $('#editDefaultsBtn').addEventListener('click', openDefaultsModal);
+  $('#serviceSearch').addEventListener('input', (e) => renderServices(e.target.value));
+  $('#toggleCollapseAllBtn').addEventListener('click', toggleCollapseAll);
 }
 
 function applyEmptyState() {
   $('#emptyState').hidden = state.rows.length > 0;
+  $('#toggleCollapseAllBtn').hidden = state.rows.length === 0;
+}
+
+function toggleCollapseAll() {
+  state.collapsedAll = !state.collapsedAll;
+  $$('.row-card').forEach((card) => card.classList.toggle('collapsed', state.collapsedAll));
+  $('#toggleCollapseAllBtn').textContent = state.collapsedAll ? 'Expand all' : 'Collapse all';
+}
+
+// ---------- Defaults (persisted in localStorage) ----------
+function loadDefaults() {
+  try {
+    const raw = localStorage.getItem('azureCalc.defaults');
+    if (!raw) return { ...FACTORY_DEFAULTS };
+    return { ...FACTORY_DEFAULTS, ...JSON.parse(raw) };
+  } catch {
+    return { ...FACTORY_DEFAULTS };
+  }
+}
+
+function saveDefaults() {
+  localStorage.setItem('azureCalc.defaults', JSON.stringify(state.defaults));
+}
+
+function wireDefaultsModal() {
+  const modal = $('#defaultsModal');
+  $('#defaultsModalClose').addEventListener('click', () => (modal.hidden = true));
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.hidden = true; });
+
+  $('#defaultsResetBtn').addEventListener('click', () => {
+    state.defaults = { ...FACTORY_DEFAULTS };
+    saveDefaults();
+    fillDefaultsModal();
+  });
+
+  $('#defaultsSaveBtn').addEventListener('click', () => {
+    state.defaults = readDefaultsModal();
+    saveDefaults();
+    modal.hidden = true;
+  });
+}
+
+function openDefaultsModal() {
+  fillDefaultsModal();
+  $('#defaultsModal').hidden = false;
+}
+
+function fillDefaultsModal() {
+  const d = state.defaults;
+  $('#defReservation').value = d.reservation;
+  $('#defUptime').value = d.uptimeHours;
+  $('#defHybridBenefit').checked = d.hybridBenefit;
+  $('#defOs').value = d.os;
+  $('#defOsDiskFamily').value = d.osDiskFamily;
+  $('#defOsDiskSize').value = d.osDiskSize;
+  $('#defDataDiskFamily').value = d.dataDiskFamily;
+  $('#defDataDiskSize').value = d.dataDiskSize;
+  $('#defBackupPolicy').value = d.backupPolicy;
+  $('#defBackupRetention').value = d.backupRetention;
+  $('#defBackupRedundancy').value = d.backupRedundancy;
+  $('#defBackupChurn').value = d.backupChurn;
+  $('#defBlobTier').value = d.blobTier;
+  $('#defBlobRedundancy').value = d.blobRedundancy;
+}
+
+function readDefaultsModal() {
+  return {
+    reservation: $('#defReservation').value,
+    uptimeHours: +$('#defUptime').value || 730,
+    hybridBenefit: $('#defHybridBenefit').checked,
+    os: $('#defOs').value,
+    osDiskFamily: $('#defOsDiskFamily').value,
+    osDiskSize: +$('#defOsDiskSize').value || 128,
+    dataDiskFamily: $('#defDataDiskFamily').value,
+    dataDiskSize: +$('#defDataDiskSize').value || 128,
+    backupPolicy: $('#defBackupPolicy').value,
+    backupRetention: +$('#defBackupRetention').value || 30,
+    backupRedundancy: $('#defBackupRedundancy').value,
+    backupChurn: +$('#defBackupChurn').value || 5,
+    blobTier: $('#defBlobTier').value,
+    blobRedundancy: $('#defBlobRedundancy').value,
+  };
 }
 
 // ---------- Row factories ----------
@@ -188,6 +359,7 @@ function addRow(type, prefill = {}, insertAfterId = null) {
 
 function makeRow(type, prefill = {}) {
   const id = uid();
+  const d = state.defaults;
   switch (type) {
     case 'vm':
       return {
@@ -196,19 +368,19 @@ function makeRow(type, prefill = {}) {
         name: prefill.name || `VM-${countRows('vm') + 1}`,
         vcpu: prefill.vcpu || 2,
         ramGiB: prefill.ramGiB || 8,
-        os: prefill.os || 'linux',
+        os: prefill.os || d.os,
         recommendedVm: null,
-        reservation: 'payg',
-        hoursPerMonth: 730,
-        hybridBenefit: false,
+        reservation: d.reservation,
+        hoursPerMonth: d.uptimeHours,
+        hybridBenefit: d.hybridBenefit,
         disks: (prefill.disks && prefill.disks.length
           ? prefill.disks
-          : [{ label: 'OS disk', family: 'Standard SSD', sizeGiB: 128 }]
-        ).map((d, idx) => ({
+          : [{ label: 'OS disk', family: d.osDiskFamily, sizeGiB: d.osDiskSize }]
+        ).map((diskSpec, idx) => ({
           id: uid(),
-          label: d.label || (idx === 0 ? 'OS disk' : `Data disk ${idx}`),
-          family: d.family || 'Standard SSD',
-          sizeGiB: d.sizeGiB || 128,
+          label: diskSpec.label || (idx === 0 ? 'OS disk' : `Data disk ${idx}`),
+          family: diskSpec.family || (idx === 0 ? d.osDiskFamily : d.dataDiskFamily),
+          sizeGiB: diskSpec.sizeGiB || (idx === 0 ? d.osDiskSize : d.dataDiskSize),
           sku: null,
         })),
       };
@@ -219,29 +391,52 @@ function makeRow(type, prefill = {}) {
         name: prefill.name || `PublicIP-${countRows('ip') + 1}`,
         count: prefill.count || 1,
       };
-    case 'backup': {
-      const d = state.backupDefaults || { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
+    case 'backup':
       return {
         id,
         type: 'backup',
         name: prefill.name || 'Backup',
         parentVmId: prefill.parentVmId || null,
         sourceSizeGiB: prefill.sourceSizeGiB || 128,
-        policy: d.policy,
-        retentionDays: d.retentionDays,
-        redundancy: d.redundancy,
-        dailyChurnPct: d.dailyChurnPct,
+        policy: d.backupPolicy,
+        retentionDays: d.backupRetention,
+        redundancy: d.backupRedundancy,
+        dailyChurnPct: d.backupChurn,
       };
-    }
     case 'storage':
       return {
         id,
         type: 'storage',
         name: prefill.name || `storage-${countRows('storage') + 1}`,
-        tier: prefill.tier || 'Hot',
-        redundancy: prefill.redundancy || 'LRS',
+        tier: d.blobTier,
+        redundancy: d.blobRedundancy,
         capacityGiB: prefill.capacityGiB || 100,
       };
+    case 'vpn':
+      return {
+        id,
+        type: 'vpn',
+        name: prefill.name || `vpn-gw-${countRows('vpn') + 1}`,
+        skuName: state.vpnSkus[0]?.skuName || null,
+      };
+    case 'nat':
+      return {
+        id,
+        type: 'nat',
+        name: prefill.name || `nat-gw-${countRows('nat') + 1}`,
+        dataProcessedGiB: 100,
+      };
+    case 'appservice': {
+      const first = state.appServiceSkus[0];
+      return {
+        id,
+        type: 'appservice',
+        name: prefill.name || `app-plan-${countRows('appservice') + 1}`,
+        productName: first?.productName || null,
+        skuName: first?.skuName || null,
+        instances: 1,
+      };
+    }
     default:
       throw new Error(`Unknown row type: ${type}`);
   }
@@ -252,7 +447,6 @@ function countRows(type) {
 }
 
 function removeRow(id) {
-  // Removing a VM also removes any backup row that referenced it.
   state.rows = state.rows.filter((r) => r.id !== id && r.parentVmId !== id);
   renderRows();
 }
@@ -263,6 +457,22 @@ function renderRows() {
   list.innerHTML = '';
   for (const row of state.rows) list.appendChild(renderRow(row));
   applyEmptyState();
+  updateRowCosts();
+}
+
+function updateRowCosts() {
+  // Reflect monthly cost from last estimate into the row header (visible even when collapsed).
+  if (!state.lastEstimate) return;
+  const byId = new Map();
+  for (const item of state.lastEstimate.items) byId.set(item.id, item.monthly);
+  $$('.row-card').forEach((card) => {
+    const cost = byId.get(card.dataset.rowId);
+    const span = card.querySelector('.row-cost');
+    if (span && typeof cost === 'number') {
+      span.textContent = fmt(cost);
+      span.classList.remove('muted');
+    }
+  });
 }
 
 function renderRow(row) {
@@ -271,16 +481,22 @@ function renderRow(row) {
     case 'ip': return renderIpRow(row);
     case 'backup': return renderBackupRow(row);
     case 'storage': return renderStorageRow(row);
+    case 'vpn': return renderVpnRow(row);
+    case 'nat': return renderNatRow(row);
+    case 'appservice': return renderAppServiceRow(row);
     default: return document.createElement('div');
   }
 }
 
 function commonWire(card, row) {
   card.dataset.rowId = row.id;
+  if (state.collapsedAll) card.classList.add('collapsed');
   const nameInput = card.querySelector('.row-name');
   nameInput.value = row.name;
   nameInput.addEventListener('input', () => { row.name = nameInput.value; });
   card.querySelector('.row-remove').addEventListener('click', () => removeRow(row.id));
+  const collapseBtn = card.querySelector('.row-collapse');
+  if (collapseBtn) collapseBtn.addEventListener('click', () => card.classList.toggle('collapsed'));
   return { nameInput };
 }
 
@@ -311,7 +527,6 @@ function renderVmRow(row) {
   ahbWrap.classList.toggle('disabled', row.os !== 'windows');
   uptimeWrap.hidden = row.reservation !== 'payg';
 
-  // Render every disk inside the VM card.
   row.disks.forEach((disk, idx) => disksList.appendChild(renderVmDisk(row, disk, idx)));
 
   vcpu.addEventListener('change', () => { row.vcpu = +vcpu.value || 0; refreshRecommendations(row, skuSel); });
@@ -335,7 +550,8 @@ function renderVmRow(row) {
   skuSel.addEventListener('change', () => { row.recommendedVm = skuSel.value || null; });
   addBackupBtn.addEventListener('click', () => onAddBackup(row));
   addDiskBtn.addEventListener('click', () => {
-    const disk = { id: uid(), label: `Data disk ${row.disks.length}`, family: 'Standard SSD', sizeGiB: 128, sku: null };
+    const d = state.defaults;
+    const disk = { id: uid(), label: `Data disk ${row.disks.length}`, family: d.dataDiskFamily, sizeGiB: d.dataDiskSize, sku: null };
     row.disks.push(disk);
     disksList.appendChild(renderVmDisk(row, disk, row.disks.length - 1));
   });
@@ -358,8 +574,6 @@ function renderVmDisk(vm, disk, idx) {
   family.value = disk.family;
   size.value = disk.sizeGiB;
 
-  // The OS disk cannot be removed nor relabelled (always called "OS disk") so the user
-  // can clearly identify it and so backup math always finds the boot volume.
   if (isOs) {
     label.value = 'OS disk';
     label.readOnly = true;
@@ -452,6 +666,69 @@ function renderStorageRow(row) {
   return card;
 }
 
+function renderVpnRow(row) {
+  const card = $('#vpnRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const sel = card.querySelector('.vpn-sku');
+  sel.innerHTML = '';
+  if (state.vpnSkus.length === 0) {
+    const opt = document.createElement('option'); opt.value = ''; opt.textContent = '(no SKUs found in region)';
+    sel.appendChild(opt);
+  } else {
+    for (const s of state.vpnSkus) {
+      const opt = document.createElement('option');
+      opt.value = s.skuName;
+      opt.textContent = `${s.skuName} — ${fmt(s.hourly * 730)} /mo`;
+      sel.appendChild(opt);
+    }
+  }
+  if (row.skuName) sel.value = row.skuName; else row.skuName = sel.value || null;
+  sel.addEventListener('change', () => { row.skuName = sel.value || null; });
+  return card;
+}
+
+function renderNatRow(row) {
+  const card = $('#natRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const data = card.querySelector('.nat-data');
+  data.value = row.dataProcessedGiB;
+  data.addEventListener('change', () => { row.dataProcessedGiB = +data.value || 0; });
+  return card;
+}
+
+function renderAppServiceRow(row) {
+  const card = $('#appserviceRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const sel = card.querySelector('.app-sku');
+  const inst = card.querySelector('.app-instances');
+  sel.innerHTML = '';
+  if (state.appServiceSkus.length === 0) {
+    const opt = document.createElement('option'); opt.value = ''; opt.textContent = '(no SKUs found in region)';
+    sel.appendChild(opt);
+  } else {
+    for (const s of state.appServiceSkus) {
+      const opt = document.createElement('option');
+      opt.value = JSON.stringify({ productName: s.productName, skuName: s.skuName });
+      opt.textContent = `${s.key} — ${fmt(s.hourly * 730)} /mo`;
+      sel.appendChild(opt);
+    }
+    if (row.productName && row.skuName) {
+      sel.value = JSON.stringify({ productName: row.productName, skuName: row.skuName });
+    } else {
+      const parsed = JSON.parse(sel.value);
+      row.productName = parsed.productName; row.skuName = parsed.skuName;
+    }
+  }
+  inst.value = row.instances;
+  sel.addEventListener('change', () => {
+    if (!sel.value) return;
+    const parsed = JSON.parse(sel.value);
+    row.productName = parsed.productName; row.skuName = parsed.skuName;
+  });
+  inst.addEventListener('change', () => { row.instances = +inst.value || 1; });
+  return card;
+}
+
 // ---------- Add Backup from a VM ----------
 function onAddBackup(vm) {
   state.rows = state.rows.filter((r) => !(r.type === 'backup' && r.parentVmId === vm.id));
@@ -461,15 +738,6 @@ function onAddBackup(vm) {
     parentVmId: vm.id,
     sourceSizeGiB: sourceSize,
   };
-
-  if (!state.backupDefaults) {
-    openBackupModal('defaults', { vmName: vm.name, onSave: (defaults) => {
-      state.backupDefaults = defaults;
-      refreshBackupDefaultsBtn();
-      addRow('backup', prefill, vm.id);
-    } });
-    return;
-  }
   addRow('backup', prefill, vm.id);
 }
 
@@ -478,58 +746,6 @@ function computeVmSourceSize(vmId) {
   if (!vm) return 128;
   const total = (vm.disks || []).reduce((s, d) => s + (d.sizeGiB || 0), 0);
   return total || 128;
-}
-
-// ---------- Backup defaults modal ----------
-let backupModalCtx = null;
-
-function wireBackupModal() {
-  $('#backupModalClose').addEventListener('click', closeBackupModal);
-  $('#backupModal').addEventListener('click', (e) => {
-    if (e.target.id === 'backupModal') closeBackupModal();
-  });
-  $('#backupSaveBtn').addEventListener('click', () => {
-    const cfg = {
-      policy: $('#backupPolicy').value,
-      retentionDays: +$('#backupRetention').value || 30,
-      redundancy: $('#backupRedundancy').value,
-      dailyChurnPct: +$('#backupChurn').value || 5,
-    };
-    backupModalCtx?.onSave?.(cfg);
-    closeBackupModal();
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !$('#backupModal').hidden) closeBackupModal();
-  });
-}
-
-function openBackupModal(mode, ctx) {
-  backupModalCtx = { mode, ...ctx };
-  const seed = state.backupDefaults || { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
-  $('#backupModalVmName').textContent = mode === 'defaults' ? `defaults${ctx?.vmName ? ` → ${ctx.vmName}` : ''}` : 'edit';
-  $('#backupModalSubtitle').textContent =
-    mode === 'defaults'
-      ? 'These values will be reused as the default for every Backup you add. You can override them on any individual backup row later.'
-      : 'Edit the saved defaults. Existing backup rows are not changed.';
-  $('#backupSaveBtn').textContent = mode === 'defaults' ? 'Save defaults' : 'Save';
-  $('#backupPolicy').value = seed.policy;
-  $('#backupRetention').value = seed.retentionDays;
-  $('#backupRedundancy').value = seed.redundancy;
-  $('#backupChurn').value = seed.dailyChurnPct;
-  $('#backupModal').hidden = false;
-}
-
-function closeBackupModal() {
-  $('#backupModal').hidden = true;
-  backupModalCtx = null;
-}
-
-function refreshBackupDefaultsBtn() {
-  $('#editBackupDefaultsBtn').hidden = !state.backupDefaults;
-}
-
-function editBackupDefaults() {
-  openBackupModal('defaults', { onSave: (cfg) => { state.backupDefaults = cfg; } });
 }
 
 // ---------- RVTools import ----------
@@ -542,14 +758,11 @@ async function onUploadRvtools(e) {
 
   state.rows = [];
   for (const v of r.vms || []) {
-    // The server returns one entry per disk as `{ label, sizeGiB }`. We preserve every
-    // disk as its own row inside the VM card so the user can tune them individually
-    // — same behaviour as the ASR side of this app.
-    const disks = (v.disks && v.disks.length ? v.disks : [{ label: 'OS disk', sizeGiB: 128 }])
+    const disks = (v.disks && v.disks.length ? v.disks : [{ label: 'OS disk', sizeGiB: state.defaults.osDiskSize }])
       .map((d, idx) => ({
         label: idx === 0 ? 'OS disk' : (d.label || `Data disk ${idx}`),
-        family: d.family || 'Standard SSD',
-        sizeGiB: d.sizeGiB || 128,
+        family: d.family || (idx === 0 ? state.defaults.osDiskFamily : state.defaults.dataDiskFamily),
+        sizeGiB: d.sizeGiB || (idx === 0 ? state.defaults.osDiskSize : state.defaults.dataDiskSize),
       }));
     addRow('vm', {
       name: v.name,
@@ -562,8 +775,21 @@ async function onUploadRvtools(e) {
   e.target.value = '';
 }
 
-// ---------- Estimate ----------
+// ---------- Estimate + Results page ----------
+function wireResultsView() {
+  $('#backToBuilderBtn').addEventListener('click', () => {
+    $('#resultsView').hidden = true;
+    $('#builderView').hidden = false;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+  $('#downloadPdfBtn').addEventListener('click', downloadEstimatePdf);
+}
+
 async function runEstimate() {
+  if (state.rows.length === 0) {
+    alert('Add at least one service before calculating.');
+    return;
+  }
   const payload = { region: state.region, currency: state.currency, rows: state.rows };
   const meta = $('#estimateMeta'); meta.textContent = 'Computing…';
   try {
@@ -573,22 +799,17 @@ async function runEstimate() {
     }).then((x) => x.json());
     if (r.error) throw new Error(r.error);
     state.lastEstimate = r;
-    renderResults(r);
+    showResultsView(r);
+    updateRowCosts();
     meta.textContent = `Computed at ${new Date().toLocaleTimeString()}`;
-    updateRowCosts(r);
   } catch (e) { meta.textContent = ''; alert('Estimate failed: ' + e.message); }
 }
 
-function updateRowCosts(r) {
-  for (const item of r.items) {
-    const card = document.querySelector(`.row-card[data-row-id="${item.id}"]`);
-    if (card) card.querySelector('.row-cost').textContent = fmt(item.monthly);
-  }
-}
+function showResultsView(r) {
+  $('#builderView').hidden = true;
+  $('#resultsView').hidden = false;
+  window.scrollTo({ top: 0 });
 
-function renderResults(r) {
-  const card = $('#resultsCard');
-  card.hidden = false;
   $('#grandTotal').textContent = fmt(r.grandMonthly);
   $('#resultsMeta').textContent = `${r.region} · ${r.currency} · ${r.items.length} row(s)`;
   const body = $('#resultsBody');
@@ -617,6 +838,177 @@ function renderResults(r) {
   } else {
     warns.hidden = true;
   }
+  renderCharts(r);
+}
+
+// ---------- Charts ----------
+let chartByType = null;
+let chartByItem = null;
+
+function renderCharts(r) {
+  if (typeof Chart === 'undefined') return;
+
+  // Group by service type.
+  const byType = {};
+  for (const item of r.items) byType[item.type] = (byType[item.type] || 0) + item.monthly;
+  const typeLabels = Object.keys(byType);
+  const typeData = typeLabels.map((k) => +byType[k].toFixed(2));
+
+  // Top 10 individual items.
+  const sortedItems = [...r.items].filter((i) => i.monthly > 0).sort((a, b) => b.monthly - a.monthly).slice(0, 10);
+
+  if (chartByType) chartByType.destroy();
+  if (chartByItem) chartByItem.destroy();
+
+  chartByType = new Chart($('#chartByType'), {
+    type: 'doughnut',
+    data: {
+      labels: typeLabels,
+      datasets: [{
+        data: typeData,
+        backgroundColor: ['#6ea8ff', '#b48cff', '#46d39a', '#f5a623', '#ff6b9d', '#7fdfff', '#ffb900'],
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: 'right', labels: { color: '#cfd6f5' } },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${fmt(ctx.parsed)}` } },
+      },
+    },
+  });
+
+  chartByItem = new Chart($('#chartByItem'), {
+    type: 'bar',
+    data: {
+      labels: sortedItems.map((i) => i.name),
+      datasets: [{
+        label: 'Monthly cost',
+        data: sortedItems.map((i) => +i.monthly.toFixed(2)),
+        backgroundColor: '#6ea8ff',
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => fmt(ctx.parsed.x) } },
+      },
+      scales: {
+        x: { ticks: { color: '#cfd6f5', callback: (v) => fmt(v) }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        y: { ticks: { color: '#cfd6f5' }, grid: { display: false } },
+      },
+    },
+  });
+}
+
+// ---------- PDF export ----------
+function downloadEstimatePdf() {
+  if (typeof pdfMake === 'undefined') {
+    alert('PDF library not loaded. Check your internet connection.');
+    return;
+  }
+  const data = state.lastEstimate;
+  if (!data) return;
+
+  const filename = `azure-estimate-${data.region}-${new Date().toISOString().slice(0, 10)}.pdf`;
+
+  const itemsRows = [
+    [
+      { text: 'Item', style: 'th' },
+      { text: 'Type', style: 'th' },
+      { text: 'Monthly', style: 'th', alignment: 'right' },
+    ],
+    ...data.items.map((i) => [
+      { text: i.name, style: 'td' },
+      { text: i.type, style: 'td' },
+      { text: fmt(i.monthly), style: 'td', alignment: 'right' },
+    ]),
+    [
+      { text: 'TOTAL', style: 'tdBold', colSpan: 2 }, {},
+      { text: fmt(data.grandMonthly), style: 'tdBold', alignment: 'right' },
+    ],
+  ];
+
+  const lineItemSections = data.items.flatMap((i) => {
+    if (!i.lineItems.length) return [];
+    return [
+      { text: `${i.name} (${i.type}) — ${fmt(i.monthly)}`, style: 'h3', margin: [0, 10, 0, 4] },
+      {
+        table: {
+          widths: ['*', '*', 80],
+          body: [
+            [
+              { text: 'Category', style: 'th' },
+              { text: 'Detail', style: 'th' },
+              { text: 'Amount', style: 'th', alignment: 'right' },
+            ],
+            ...i.lineItems.map((li) => [
+              { text: li.category, style: 'td' },
+              { text: li.detail || '', style: 'td' },
+              { text: fmt(li.amount), style: 'td', alignment: 'right' },
+            ]),
+          ],
+        },
+        layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' },
+      },
+    ];
+  });
+
+  const doc = {
+    pageMargins: [40, 50, 40, 50],
+    content: [
+      { text: 'Azure Calculator — Estimate', style: 'h1' },
+      { text: `Generated ${new Date().toLocaleString()}`, style: 'sub', margin: [0, 0, 0, 10] },
+      {
+        table: {
+          widths: [80, '*'],
+          body: [
+            [{ text: 'Region', style: 'metaKey' }, { text: data.region, style: 'metaVal' }],
+            [{ text: 'Currency', style: 'metaKey' }, { text: data.currency, style: 'metaVal' }],
+            [{ text: 'Rows', style: 'metaKey' }, { text: String(data.items.length), style: 'metaVal' }],
+            [{ text: 'Grand total', style: 'metaKey' }, { text: fmt(data.grandMonthly), style: 'metaVal' }],
+          ],
+        },
+        layout: 'noBorders',
+        margin: [0, 0, 0, 14],
+      },
+      { text: 'Summary', style: 'h2' },
+      {
+        table: { headerRows: 1, widths: ['*', 80, 80], body: itemsRows },
+        layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' },
+      },
+      { text: 'Per-item breakdown', style: 'h2', margin: [0, 16, 0, 6] },
+      ...lineItemSections,
+      ...(data.warnings && data.warnings.length
+        ? [
+            { text: 'Warnings', style: 'h2', margin: [0, 14, 0, 6] },
+            { ul: data.warnings, style: 'td' },
+          ]
+        : []),
+      {
+        text: 'Estimates only — derived from public Azure Retail Prices. Real invoices may differ.',
+        style: 'sub',
+        margin: [0, 18, 0, 0],
+      },
+    ],
+    styles: {
+      h1: { fontSize: 18, bold: true, color: '#1a2347' },
+      h2: { fontSize: 14, bold: true, color: '#1a2347', margin: [0, 10, 0, 6] },
+      h3: { fontSize: 12, bold: true, color: '#1a2347' },
+      sub: { fontSize: 9, color: '#6b7591', italics: true },
+      th: { bold: true, fillColor: '#eef1ff', color: '#1a2347', margin: [4, 4, 4, 4] },
+      td: { color: '#1a2347', fontSize: 10, margin: [4, 3, 4, 3] },
+      tdBold: { bold: true, color: '#1a2347', fontSize: 10, margin: [4, 3, 4, 3] },
+      metaKey: { color: '#6b7591', fontSize: 10, margin: [0, 1, 0, 1] },
+      metaVal: { color: '#1a2347', fontSize: 10, bold: true, margin: [0, 1, 0, 1] },
+    },
+  };
+
+  pdfMake.createPdf(doc).download(filename);
 }
 
 function escapeHtml(s) {

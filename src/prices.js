@@ -49,6 +49,9 @@ function regionOr(regions) {
 //   bandwidth:      Item[],   // inter-region egress
 //   backup:         Item[],   // Azure Backup
 //   blobStorage:    Item[],   // Hot/Cool/Archive blob tiers
+//   vpnGateway:     Item[],   // VPN Gateway hourly SKUs
+//   natGateway:     Item[],   // NAT Gateway hourly + processed data
+//   appServicePlan: Item[],   // App Service Plan hourly SKUs
 //   updatedAt:      Date,
 // }
 
@@ -72,6 +75,9 @@ export function getStatus() {
       bandwidthCount: cache[cur]?.bandwidth?.length || 0,
       backupCount: cache[cur]?.backup?.length || 0,
       blobStorageCount: cache[cur]?.blobStorage?.length || 0,
+      vpnGatewayCount: cache[cur]?.vpnGateway?.length || 0,
+      natGatewayCount: cache[cur]?.natGateway?.length || 0,
+      appServicePlanCount: cache[cur]?.appServicePlan?.length || 0,
     })),
   };
 }
@@ -103,8 +109,14 @@ export async function warmCache({ verbose = true } = {}) {
       const backupFilter = `serviceName eq 'Backup' and ${regionFilter} and priceType eq 'Consumption'`;
       // 9. Blob Storage — Hot/Cool/Archive tiers + LRS/GRS/ZRS redundancies (data stored)
       const blobFilter = `serviceName eq 'Storage' and (productName eq 'General Block Blob v2' or productName eq 'Blob Storage' or productName eq 'Archive Blob Storage') and ${regionFilter} and priceType eq 'Consumption'`;
+      // 10. VPN Gateway — hourly SKUs (Basic, VpnGw1..5, with AZ variants)
+      const vpnFilter = `serviceName eq 'VPN Gateway' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 11. NAT Gateway — gateway hours + data processed
+      const natFilter = `serviceName eq 'NAT Gateway' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 12. App Service Plan — Basic/Standard/PremiumV3/Isolated tiers
+      const appSvcFilter = `serviceName eq 'Azure App Service' and ${regionFilter} and priceType eq 'Consumption'`;
 
-      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
@@ -114,6 +126,9 @@ export async function warmCache({ verbose = true } = {}) {
         fetchAllPages(vmRiFilter, currency, { pageLimit: 200 }),
         fetchAllPages(backupFilter, currency, { pageLimit: 50 }),
         fetchAllPages(blobFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(vpnFilter, currency, { pageLimit: 20 }),
+        fetchAllPages(natFilter, currency, { pageLimit: 10 }),
+        fetchAllPages(appSvcFilter, currency, { pageLimit: 80 }),
       ]);
 
       cache[currency] = {
@@ -126,6 +141,9 @@ export async function warmCache({ verbose = true } = {}) {
         bandwidth,
         backup,
         blobStorage,
+        vpnGateway,
+        natGateway,
+        appServicePlan,
         updatedAt: new Date(),
       };
 
@@ -134,7 +152,8 @@ export async function warmCache({ verbose = true } = {}) {
           `[prices] ${currency} warmed in ${Date.now() - t0}ms ` +
             `(asr=${asr.length}, disks=${disks.length}, vms=${vms.length}, vmRI=${vmReservations.length}, ` +
             `cacheStore=${cacheStore.length}, publicIp=${publicIp.length}, bandwidth=${bandwidth.length}, ` +
-            `backup=${backup.length}, blob=${blobStorage.length})`
+            `backup=${backup.length}, blob=${blobStorage.length}, vpn=${vpnGateway.length}, ` +
+            `nat=${natGateway.length}, appSvc=${appServicePlan.length})`
         );
       }
     }
@@ -448,20 +467,52 @@ export function findVmEffectiveHourly(currency, armRegionName, armSkuName, os, o
 }
 
 /**
- * Azure Backup protected instance fee for a given source size.
- * Microsoft's published schedule (per instance / month):
- *   - <= 50 GB:        one fee
- *   - > 50 GB, <= 500: a higher fee
- *   - every additional 500 GB tranche: same as the 500-GB fee added again
+ * Azure VM Backup — Protected Instance (agent) fee.
  *
- * The API meters are named "Azure VM Backup Protected Instances Size <= 50 GB",
- * "Azure VM Backup Protected Instances Size > 50 GB to 500 GB", and
- * "Azure VM Backup Protected Instances Size > 500 GB Multiples" (or similar).
+ * The Azure Retail Prices API publishes a single flat meter named exactly
+ * `Azure VM Protected Instance` (skuName='Azure VM', productName='Backup') of
+ * ~€8.5/month per protected VM. That is the "agent" fee the user was missing
+ * from the estimate. For workloads above 500 GB the same per-instance fee
+ * applies to every additional 500-GB tranche (per Microsoft's published
+ * pricing schedule, since the size-tiered meter names have been collapsed into
+ * the single "Azure VM Protected Instance" meter).
  *
  * Returns { monthly, breakdown[] }.
  */
 export function findBackupProtectedInstanceMonthly(currency, armRegionName, sizeGiB) {
   const items = cache[currency]?.backup || [];
+  // The Azure VM workload meter (modern, post-2021 schedule).
+  const azureVm = items.find(
+    (i) =>
+      (i.armRegionName === armRegionName || !i.armRegionName) &&
+      (i.skuName || '').toLowerCase() === 'azure vm' &&
+      /azure\s*vm\s*protected\s*instance/i.test(i.meterName || '')
+  );
+
+  if (azureVm) {
+    const breakdown = [];
+    let monthly = azureVm.retailPrice;
+    breakdown.push({
+      tier: sizeGiB <= 500 ? `Azure VM Protected Instance (\u2264 500 GiB)` : 'Azure VM Protected Instance (first 500 GiB)',
+      amount: azureVm.retailPrice,
+      meterName: azureVm.meterName,
+    });
+    if (sizeGiB > 500) {
+      const extra = Math.ceil((sizeGiB - 500) / 500);
+      const cost = azureVm.retailPrice * extra;
+      monthly += cost;
+      breakdown.push({
+        tier: `${extra} \u00d7 additional 500 GiB tranche(s)`,
+        amount: cost,
+        unit: azureVm.retailPrice,
+        meterName: azureVm.meterName,
+      });
+    }
+    return { monthly, breakdown, currency };
+  }
+
+  // Fallback to the legacy size-tiered MARS / on-prem schedule if Azure VM meter is
+  // not published in this region/currency (rare, but keeps older behaviour intact).
   const regional = items.filter(
     (i) =>
       (i.armRegionName === armRegionName || !i.armRegionName) &&
@@ -483,8 +534,6 @@ export function findBackupProtectedInstanceMonthly(currency, armRegionName, size
     monthly += mid.retailPrice;
     breakdown.push({ tier: '> 50 GiB to 500 GiB', amount: mid.retailPrice, meterName: mid.meterName });
   } else if (sizeGiB > 500) {
-    // Mid bracket counts once for the first 500 GB, then a 500-GB tranche for every additional
-    // 500 GB or part thereof.
     if (mid) {
       monthly += mid.retailPrice;
       breakdown.push({ tier: 'First 500 GiB', amount: mid.retailPrice, meterName: mid.meterName });
@@ -584,3 +633,93 @@ export function findBlobStoragePricePerGiBMonth(currency, armRegionName, tier /*
 }
 
 export { HOURS_PER_MONTH };
+
+// ---------- VPN Gateway / NAT Gateway / App Service Plan ----------
+
+/**
+ * List the available VPN Gateway SKUs for the region (deduplicated by skuName).
+ * Returns [{ skuName, hourly, productName, meterName }, ...] sorted alphabetically.
+ */
+export function listVpnGatewaySkus(currency, armRegionName) {
+  const items = cache[currency]?.vpnGateway || [];
+  const byHour = items.filter(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      /(hour|gateway)/i.test(i.unitOfMeasure || '') &&
+      !/data\s*transfer|egress|inter/i.test(i.meterName || '')
+  );
+  const seen = new Map();
+  for (const i of byHour) {
+    const key = i.skuName || i.meterName;
+    if (!key) continue;
+    if (!seen.has(key)) {
+      seen.set(key, { skuName: key, hourly: i.retailPrice, productName: i.productName, meterName: i.meterName });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.skuName.localeCompare(b.skuName));
+}
+
+export function findVpnGatewayPrice(currency, armRegionName, skuName) {
+  const items = cache[currency]?.vpnGateway || [];
+  return items.find(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      i.skuName === skuName &&
+      /(hour|gateway)/i.test(i.unitOfMeasure || '') &&
+      !/data\s*transfer|egress|inter/i.test(i.meterName || '')
+  ) || null;
+}
+
+/**
+ * NAT Gateway hourly + processed-data prices.
+ */
+export function findNatGatewayPrice(currency, armRegionName) {
+  const items = cache[currency]?.natGateway || [];
+  const hour = items.find(
+    (i) => i.armRegionName === armRegionName && /gateway\s*hour|nat\s*gateway/i.test(i.meterName || '') && /hour/i.test(i.unitOfMeasure || '')
+  );
+  const data = items.find(
+    (i) => i.armRegionName === armRegionName && /data\s*processed/i.test(i.meterName || '')
+  );
+  return { hour, data };
+}
+
+/**
+ * List the App Service Plan SKUs for the region.
+ * Filters down to per-instance hourly meters (Basic/Standard/PremiumV3/Isolated tiers).
+ */
+export function listAppServicePlanSkus(currency, armRegionName) {
+  const items = cache[currency]?.appServicePlan || [];
+  const byHour = items.filter(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      /hour/i.test(i.unitOfMeasure || '') &&
+      !/stamp\s*fee|isolated\s*v2\s*stamp/i.test(i.meterName || '')
+  );
+  const seen = new Map();
+  for (const i of byHour) {
+    const key = `${i.productName || ''} \u2014 ${i.skuName || ''}`.trim();
+    if (!key || key === '\u2014') continue;
+    if (!seen.has(key)) {
+      seen.set(key, {
+        key,
+        skuName: i.skuName,
+        productName: i.productName,
+        hourly: i.retailPrice,
+        meterName: i.meterName,
+      });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+export function findAppServicePlanPrice(currency, armRegionName, productName, skuName) {
+  const items = cache[currency]?.appServicePlan || [];
+  return items.find(
+    (i) =>
+      i.armRegionName === armRegionName &&
+      i.productName === productName &&
+      i.skuName === skuName &&
+      /hour/i.test(i.unitOfMeasure || '')
+  ) || null;
+}
