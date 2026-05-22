@@ -1,55 +1,39 @@
-// Azure Calculator frontend.
-// Vanilla ES modules.
+// Azure Calculator frontend — row-based model inspired by the official Azure Pricing
+// Calculator. Each user-added service is a row, rendered as its own card and priced
+// independently. Backup rows are linked to a parent VM and inserted right under it.
 
 const SERVICES = [
   {
-    id: 'vm',
-    title: 'Virtual Machines',
-    sub: 'Compute, OS disk, reservations, AHB',
+    type: 'vm',
+    title: 'Virtual Machine',
+    sub: 'Compute + OS disk',
     icon: '/icons/compute/10021-icon-service-Virtual-Machine.svg',
-    defaultOn: true,
-    required: true,
   },
   {
-    id: 'disks',
-    title: 'Managed Disks',
-    sub: 'Standard / Premium SSD',
+    type: 'disk',
+    title: 'Managed Disk',
+    sub: 'Extra data disks',
     icon: '/icons/compute/10032-icon-service-Disks.svg',
-    defaultOn: true,
   },
   {
-    id: 'backup',
-    title: 'Azure Backup',
-    sub: 'Per-VM Backup add-on',
-    icon: '/icons/storage/00017-icon-service-Recovery-Services-Vaults.svg',
-    defaultOn: true,
-  },
-  {
-    id: 'storage',
-    title: 'Storage Accounts',
+    type: 'storage',
+    title: 'Storage Account',
     sub: 'Blob (Hot/Cool/Archive)',
     icon: '/icons/storage/10086-icon-service-Storage-Accounts.svg',
-    defaultOn: true,
   },
   {
-    id: 'pip',
+    type: 'ip',
     title: 'Public IP',
     sub: 'Standard Static IPv4',
     icon: '/icons/networking/10069-icon-service-Public-IP-Addresses.svg',
-    defaultOn: false,
   },
 ];
 
 const state = {
   region: null,
   currency: 'EUR',
-  servicesEnabled: new Set(SERVICES.filter((s) => s.defaultOn).map((s) => s.id)),
-  vms: [],
-  storageAccounts: [],
+  rows: [],
   diskTiers: { 'Standard SSD': [], 'Premium SSD': [] },
-  // Backup defaults are captured the first time the user enables backup on any VM.
-  // null  = never configured — next "Add Backup" click opens the modal to set them.
-  // {...} = remembered; clicking "Add Backup" on an unprotected VM applies them instantly.
   backupDefaults: null,
   lastEstimate: null,
 };
@@ -59,7 +43,7 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const uid = () => Math.random().toString(36).slice(2, 10);
 const fmt = (n) => {
   try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency: state.currency }).format(n);
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: state.currency }).format(n || 0);
   } catch {
     return `${(n || 0).toFixed(2)} ${state.currency}`;
   }
@@ -68,13 +52,27 @@ const fmt = (n) => {
 init();
 
 async function init() {
+  wireDisclaimer();
   await Promise.all([loadRegions(), loadCurrencies(), loadDiskTiers()]);
   renderServices();
   wireToolbar();
   wireBackupModal();
   pollStatus();
-  addBlankVm();
-  applyServiceVisibility();
+  applyEmptyState();
+}
+
+// ---------- Disclaimer ----------
+function wireDisclaimer() {
+  const modal = $('#disclaimerModal');
+  // Sessions remember acceptance so the user is not nagged every time during a session,
+  // but always sees it after a browser restart.
+  if (sessionStorage.getItem('azureCalc.disclaimer') === 'accepted') {
+    modal.hidden = true;
+  }
+  $('#disclaimerAcceptBtn').addEventListener('click', () => {
+    sessionStorage.setItem('azureCalc.disclaimer', 'accepted');
+    modal.hidden = true;
+  });
 }
 
 // ---------- Bootstrap data ----------
@@ -122,21 +120,20 @@ function pickDiskTier(family, sizeGiB) {
   return tiers.find((t) => t.sizeGiB >= sizeGiB) || tiers[tiers.length - 1] || null;
 }
 
-async function pollStatus(force = false) {
+async function pollStatus() {
   const pill = $('#statusPill');
   try {
     const s = await fetch('/api/status').then((x) => x.json());
     if (s.warming) {
       pill.textContent = 'Warming prices…';
       pill.className = 'status-pill warming';
-      setTimeout(() => pollStatus(), 1500);
+      setTimeout(pollStatus, 1500);
     } else if (s.lastError) {
       pill.textContent = 'Price cache error';
       pill.className = 'status-pill error';
     } else {
       const cur = s.currencies.find((c) => c.currency === state.currency);
-      const counts = cur ? `VMs ${cur.vmCount} · Disks ${cur.diskCount} · Backup ${cur.backupCount} · Blob ${cur.blobStorageCount}` : 'Ready';
-      pill.textContent = counts;
+      pill.textContent = cur ? `VMs ${cur.vmCount} · Disks ${cur.diskCount} · Backup ${cur.backupCount}` : 'Ready';
       pill.className = 'status-pill ready';
     }
   } catch {
@@ -145,7 +142,7 @@ async function pollStatus(force = false) {
   }
 }
 
-// ---------- Services strip ----------
+// ---------- Service add-row strip ----------
 function renderServices() {
   const grid = $('#servicesGrid');
   grid.innerHTML = '';
@@ -153,350 +150,334 @@ function renderServices() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'service-tile';
-    btn.setAttribute('aria-pressed', state.servicesEnabled.has(svc.id));
-    btn.dataset.serviceId = svc.id;
+    btn.dataset.serviceType = svc.type;
     btn.innerHTML = `
       <img src="${svc.icon}" alt="" />
       <span class="st-body">
         <span class="st-title">${svc.title}</span>
         <span class="st-sub">${svc.sub}</span>
       </span>
-      <span class="st-check">✓</span>
+      <span class="st-add" aria-hidden="true">+</span>
     `;
-    btn.addEventListener('click', () => {
-      if (svc.required) return;
-      if (state.servicesEnabled.has(svc.id)) state.servicesEnabled.delete(svc.id);
-      else state.servicesEnabled.add(svc.id);
-      btn.setAttribute('aria-pressed', state.servicesEnabled.has(svc.id));
-      applyServiceVisibility();
-    });
+    btn.addEventListener('click', () => addRow(svc.type));
     grid.appendChild(btn);
   }
-}
-
-function applyServiceVisibility() {
-  $('#vmSectionWrapper').hidden = !state.servicesEnabled.has('vm');
-  $('#storageSectionWrapper').hidden = !state.servicesEnabled.has('storage');
-
-  // Show/hide per-VM controls
-  const showDisks = state.servicesEnabled.has('disks');
-  const showBackup = state.servicesEnabled.has('backup');
-  const showPip = state.servicesEnabled.has('pip');
-  $$('#vmList .vm-card').forEach((card) => {
-    card.querySelector('.vm-disks').hidden = !showDisks;
-    card.querySelector('.backup-btn').hidden = !showBackup;
-    card.querySelector('.vm-backup-summary').hidden = !showBackup;
-    const pip = card.querySelector('.vm-pip').closest('label');
-    pip.hidden = !showPip;
-  });
-  $('#editBackupDefaultsBtn').hidden = !showBackup || !state.backupDefaults;
 }
 
 // ---------- Toolbar ----------
 function wireToolbar() {
   $('#refreshPricesBtn').addEventListener('click', async () => {
     await fetch('/api/refresh-prices', { method: 'POST' });
-    pollStatus(true);
+    pollStatus();
   });
-  $('#addVmBtn').addEventListener('click', () => addBlankVm());
   $('#rvtoolsFile').addEventListener('change', onUploadRvtools);
-  $('#addStorageBtn').addEventListener('click', () => addStorageAccount());
   $('#estimateBtn').addEventListener('click', runEstimate);
-  $('#currencySelect').addEventListener('change', () => pollStatus(true));
+  $('#currencySelect').addEventListener('change', pollStatus);
   $('#editBackupDefaultsBtn').addEventListener('click', editBackupDefaults);
 }
 
-function refreshBackupDefaultsBtn() {
-  applyServiceVisibility();
+function applyEmptyState() {
+  $('#emptyState').hidden = state.rows.length > 0;
 }
 
-function editBackupDefaults() {
-  // Pseudo-VM target so the modal can reuse its layout. Saving overwrites defaults
-  // without touching any individual VM.
-  const pseudo = { name: 'all VMs', backup: state.backupDefaults && { ...state.backupDefaults, enabled: true }, _refreshBackupUi: () => {} };
-  openBackupModal(pseudo, 'defaults');
-}
-
-// ---------- VM cards ----------
-function addBlankVm() {
-  const vm = {
-    id: uid(),
-    name: `VM-${state.vms.length + 1}`,
-    vcpu: 2,
-    ramGiB: 8,
-    os: 'linux',
-    recommendedVm: null,
-    reservation: 'payg',
-    hybridBenefit: false,
-    publicIp: false,
-    disks: [{ id: uid(), family: 'Standard SSD', sizeGiB: 128, role: 'OS' }],
-    backup: null,
-  };
-  state.vms.push(vm);
-  renderVmCard(vm);
-  applyServiceVisibility();
-}
-
-function renderVmCard(vm) {
-  const tpl = $('#vmCardTpl').content.cloneNode(true);
-  const card = tpl.querySelector('.vm-card');
-  card.dataset.vmId = vm.id;
-
-  const nameInput = card.querySelector('.vm-name');
-  const vcpuInput = card.querySelector('.vm-vcpu');
-  const ramInput = card.querySelector('.vm-ram');
-  const skuSelect = card.querySelector('.vm-sku');
-  const reservationSel = card.querySelector('.vm-reservation');
-  const ahbInput = card.querySelector('.vm-ahb');
-  const ahbLabel = card.querySelector('.ahb-label');
-  const pipInput = card.querySelector('.vm-pip');
-  const osButtons = $$('.os-btn', card);
-  const disksWrap = card.querySelector('.disk-rows');
-  const backupBtn = card.querySelector('.backup-btn');
-  const backupLabel = card.querySelector('.backup-label');
-  const backupSummary = card.querySelector('.vm-backup-summary');
-
-  nameInput.value = vm.name;
-  vcpuInput.value = vm.vcpu;
-  ramInput.value = vm.ramGiB;
-  reservationSel.value = vm.reservation;
-  ahbInput.checked = vm.hybridBenefit;
-  pipInput.checked = vm.publicIp;
-  osButtons.forEach((b) => b.setAttribute('aria-pressed', b.dataset.os === vm.os));
-  updateAhbLabel();
-
-  nameInput.addEventListener('input', () => (vm.name = nameInput.value));
-  vcpuInput.addEventListener('change', () => {
-    vm.vcpu = Number(vcpuInput.value) || 0;
-    refreshRecommendations();
-  });
-  ramInput.addEventListener('change', () => {
-    vm.ramGiB = Number(ramInput.value) || 0;
-    refreshRecommendations();
-  });
-  reservationSel.addEventListener('change', () => (vm.reservation = reservationSel.value));
-  ahbInput.addEventListener('change', () => (vm.hybridBenefit = ahbInput.checked));
-  pipInput.addEventListener('change', () => (vm.publicIp = pipInput.checked));
-  osButtons.forEach((b) =>
-    b.addEventListener('click', () => {
-      vm.os = b.dataset.os;
-      osButtons.forEach((other) => other.setAttribute('aria-pressed', other === b));
-      updateAhbLabel();
-    })
-  );
-  skuSelect.addEventListener('change', () => (vm.recommendedVm = skuSelect.value || null));
-
-  function updateAhbLabel() {
-    // AHB only meaningful for Windows
-    ahbLabel.classList.toggle('disabled', vm.os !== 'windows');
+// ---------- Row factories ----------
+function addRow(type, prefill = {}, insertAfterId = null) {
+  const row = makeRow(type, prefill);
+  if (insertAfterId) {
+    const idx = state.rows.findIndex((r) => r.id === insertAfterId);
+    state.rows.splice(idx + 1, 0, row);
+  } else {
+    state.rows.push(row);
   }
+  renderRows();
+  return row;
+}
 
-  card.querySelector('.vm-remove').addEventListener('click', () => {
-    state.vms = state.vms.filter((v) => v.id !== vm.id);
-    card.remove();
-  });
-
-  card.querySelector('.add-disk').addEventListener('click', () => {
-    const d = { id: uid(), family: 'Standard SSD', sizeGiB: 128, role: '' };
-    vm.disks.push(d);
-    renderDiskRow(vm, d, disksWrap);
-  });
-
-  for (const d of vm.disks) renderDiskRow(vm, d, disksWrap);
-
-  backupBtn.addEventListener('click', () => onBackupButton(vm));
-  function refreshBackupUi() {
-    if (vm.backup && vm.backup.enabled) {
-      backupBtn.classList.add('active');
-      backupLabel.textContent = 'Backup configured';
-      backupSummary.textContent = `${vm.backup.policy} · ${vm.backup.retentionDays}d · ${vm.backup.redundancy} · click to edit`;
-    } else {
-      backupBtn.classList.remove('active');
-      backupLabel.textContent = 'Add Backup';
-      backupSummary.textContent = '';
+function makeRow(type, prefill = {}) {
+  const id = uid();
+  switch (type) {
+    case 'vm':
+      return {
+        id,
+        type: 'vm',
+        name: prefill.name || `VM-${countRows('vm') + 1}`,
+        vcpu: prefill.vcpu || 2,
+        ramGiB: prefill.ramGiB || 8,
+        os: prefill.os || 'linux',
+        recommendedVm: null,
+        reservation: 'payg',
+        hybridBenefit: false,
+        osDisk: {
+          family: prefill.osDiskFamily || 'Standard SSD',
+          sizeGiB: prefill.osDiskSizeGiB || 128,
+          sku: null,
+        },
+      };
+    case 'disk':
+      return {
+        id,
+        type: 'disk',
+        name: prefill.name || `Disk-${countRows('disk') + 1}`,
+        family: prefill.family || 'Standard SSD',
+        sizeGiB: prefill.sizeGiB || 128,
+        sku: null,
+        attachedToVmId: prefill.attachedToVmId || '',
+      };
+    case 'ip':
+      return {
+        id,
+        type: 'ip',
+        name: prefill.name || `PublicIP-${countRows('ip') + 1}`,
+        count: prefill.count || 1,
+      };
+    case 'backup': {
+      const d = state.backupDefaults || { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
+      return {
+        id,
+        type: 'backup',
+        name: prefill.name || 'Backup',
+        parentVmId: prefill.parentVmId || null,
+        sourceSizeGiB: prefill.sourceSizeGiB || 128,
+        policy: d.policy,
+        retentionDays: d.retentionDays,
+        redundancy: d.redundancy,
+        dailyChurnPct: d.dailyChurnPct,
+      };
     }
+    case 'storage':
+      return {
+        id,
+        type: 'storage',
+        name: prefill.name || `storage-${countRows('storage') + 1}`,
+        tier: prefill.tier || 'Hot',
+        redundancy: prefill.redundancy || 'LRS',
+        capacityGiB: prefill.capacityGiB || 100,
+      };
+    default:
+      throw new Error(`Unknown row type: ${type}`);
   }
-  vm._refreshBackupUi = refreshBackupUi;
-  refreshBackupUi();
-
-  // Initial recommendation fetch
-  refreshRecommendationsForVm(vm, skuSelect);
-
-  $('#vmList').appendChild(card);
 }
 
-async function refreshRecommendationsForVm(vm, skuSelect) {
+function countRows(type) {
+  return state.rows.filter((r) => r.type === type).length;
+}
+
+function removeRow(id) {
+  // Removing a VM also removes any child backup rows that reference it.
+  state.rows = state.rows.filter((r) => r.id !== id && r.parentVmId !== id);
+  renderRows();
+}
+
+// ---------- Render ----------
+function renderRows() {
+  const list = $('#rowsList');
+  list.innerHTML = '';
+  for (const row of state.rows) list.appendChild(renderRow(row));
+  applyEmptyState();
+  // Update "Attached to" selectors on every disk row so they always see the current
+  // VM list.
+  refreshDiskAttachments();
+}
+
+function renderRow(row) {
+  switch (row.type) {
+    case 'vm': return renderVmRow(row);
+    case 'disk': return renderDiskRow(row);
+    case 'ip': return renderIpRow(row);
+    case 'backup': return renderBackupRow(row);
+    case 'storage': return renderStorageRow(row);
+    default: return document.createElement('div');
+  }
+}
+
+function commonWire(card, row) {
+  card.dataset.rowId = row.id;
+  const nameInput = card.querySelector('.row-name');
+  nameInput.value = row.name;
+  nameInput.addEventListener('input', () => { row.name = nameInput.value; });
+  card.querySelector('.row-remove').addEventListener('click', () => removeRow(row.id));
+  return { nameInput };
+}
+
+function renderVmRow(row) {
+  const card = $('#vmRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+
+  const vcpu = card.querySelector('.vm-vcpu');
+  const ram = card.querySelector('.vm-ram');
+  const skuSel = card.querySelector('.vm-sku');
+  const resSel = card.querySelector('.vm-reservation');
+  const ahb = card.querySelector('.vm-ahb');
+  const ahbWrap = card.querySelector('.ahb-wrap');
+  const osBtns = $$('.os-btn', card);
+  const dFam = card.querySelector('.vm-osdisk-family');
+  const dSize = card.querySelector('.vm-osdisk-size');
+  const dSku = card.querySelector('.vm-osdisk-sku');
+  const addBackupBtn = card.querySelector('.add-backup-btn');
+
+  vcpu.value = row.vcpu; ram.value = row.ramGiB; resSel.value = row.reservation;
+  ahb.checked = row.hybridBenefit; dFam.value = row.osDisk.family; dSize.value = row.osDisk.sizeGiB;
+  osBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.os === row.os));
+  ahbWrap.classList.toggle('disabled', row.os !== 'windows');
+  recomputeOsDiskSku();
+
+  function recomputeOsDiskSku() {
+    const tier = pickDiskTier(row.osDisk.family, row.osDisk.sizeGiB);
+    row.osDisk.sku = tier ? tier.sku : null;
+    dSku.textContent = tier ? tier.sku : '—';
+  }
+
+  vcpu.addEventListener('change', () => { row.vcpu = +vcpu.value || 0; refreshRecommendations(row, skuSel); });
+  ram.addEventListener('change', () => { row.ramGiB = +ram.value || 0; refreshRecommendations(row, skuSel); });
+  resSel.addEventListener('change', () => { row.reservation = resSel.value; });
+  ahb.addEventListener('change', () => { row.hybridBenefit = ahb.checked; });
+  osBtns.forEach((b) => b.addEventListener('click', () => {
+    row.os = b.dataset.os;
+    osBtns.forEach((o) => o.setAttribute('aria-pressed', o === b));
+    ahbWrap.classList.toggle('disabled', row.os !== 'windows');
+  }));
+  dFam.addEventListener('change', () => { row.osDisk.family = dFam.value; recomputeOsDiskSku(); });
+  dSize.addEventListener('change', () => { row.osDisk.sizeGiB = +dSize.value || 0; recomputeOsDiskSku(); });
+  skuSel.addEventListener('change', () => { row.recommendedVm = skuSel.value || null; });
+  addBackupBtn.addEventListener('click', () => onAddBackup(row));
+
+  refreshRecommendations(row, skuSel);
+  return card;
+}
+
+async function refreshRecommendations(row, skuSel) {
   try {
     const r = await fetch('/api/recommend', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vcpu: vm.vcpu, ramGiB: vm.ramGiB }),
+      body: JSON.stringify({ vcpu: row.vcpu, ramGiB: row.ramGiB }),
     }).then((x) => x.json());
-    skuSelect.innerHTML = '';
+    skuSel.innerHTML = '';
     if (!Array.isArray(r) || r.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = 'No match';
-      skuSelect.appendChild(opt);
-      vm.recommendedVm = null;
-      return;
+      const opt = document.createElement('option'); opt.value = ''; opt.textContent = 'No match';
+      skuSel.appendChild(opt);
+      row.recommendedVm = null; return;
     }
     for (const rec of r) {
       const opt = document.createElement('option');
       opt.value = rec.armSkuName;
       opt.textContent = `${rec.armSkuName} — ${rec.vcpu}v / ${rec.ramGiB}GiB`;
-      skuSelect.appendChild(opt);
+      skuSel.appendChild(opt);
     }
-    skuSelect.value = r[0].armSkuName;
-    vm.recommendedVm = r[0].armSkuName;
-  } catch (e) {
-    console.error('recommend error', e);
-  }
+    skuSel.value = r[0].armSkuName;
+    row.recommendedVm = r[0].armSkuName;
+  } catch (e) { console.error('recommend error', e); }
 }
 
-function refreshRecommendations() {
-  for (const vm of state.vms) {
-    const card = $(`.vm-card[data-vm-id="${vm.id}"]`);
-    if (!card) continue;
-    const sel = card.querySelector('.vm-sku');
-    refreshRecommendationsForVm(vm, sel);
+function renderDiskRow(row) {
+  const card = $('#diskRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const fam = card.querySelector('.disk-family');
+  const size = card.querySelector('.disk-size');
+  const sku = card.querySelector('.disk-sku');
+  const att = card.querySelector('.disk-attached');
+  fam.value = row.family; size.value = row.sizeGiB;
+  recompute();
+
+  function recompute() {
+    const tier = pickDiskTier(row.family, row.sizeGiB);
+    row.sku = tier ? tier.sku : null;
+    sku.textContent = tier ? tier.sku : '—';
   }
+  fam.addEventListener('change', () => { row.family = fam.value; recompute(); });
+  size.addEventListener('change', () => { row.sizeGiB = +size.value || 0; recompute(); });
+  att.addEventListener('change', () => { row.attachedToVmId = att.value || ''; });
+  return card;
 }
 
-function renderDiskRow(vm, d, container) {
-  const tpl = $('#diskRowTpl').content.cloneNode(true);
-  const row = tpl.querySelector('.disk-row');
-  row.dataset.diskId = d.id;
-  const familySel = row.querySelector('.disk-family');
-  const sizeInput = row.querySelector('.disk-size');
-  const skuLabel = row.querySelector('.disk-sku');
-  const roleInput = row.querySelector('.disk-role');
-
-  familySel.value = d.family;
-  sizeInput.value = d.sizeGiB;
-  roleInput.value = d.role || '';
-
-  function recomputeSku() {
-    const tier = pickDiskTier(d.family, d.sizeGiB);
-    d.sku = tier ? tier.sku : null;
-    skuLabel.textContent = tier ? tier.sku : '—';
-  }
-  recomputeSku();
-
-  familySel.addEventListener('change', () => {
-    d.family = familySel.value;
-    recomputeSku();
+function refreshDiskAttachments() {
+  const vmOptions = state.rows.filter((r) => r.type === 'vm');
+  $$('.row-card[data-type="disk"]').forEach((card) => {
+    const id = card.dataset.rowId;
+    const row = state.rows.find((r) => r.id === id);
+    if (!row) return;
+    const sel = card.querySelector('.disk-attached');
+    sel.innerHTML = `<option value="">(unattached)</option>` + vmOptions.map((v) => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('');
+    sel.value = row.attachedToVmId || '';
   });
-  sizeInput.addEventListener('change', () => {
-    d.sizeGiB = Number(sizeInput.value) || 0;
-    recomputeSku();
-  });
-  roleInput.addEventListener('input', () => (d.role = roleInput.value));
-  row.querySelector('.disk-remove').addEventListener('click', () => {
-    vm.disks = vm.disks.filter((x) => x.id !== d.id);
-    row.remove();
-  });
-
-  container.appendChild(row);
 }
 
-// ---------- RVTools import ----------
-async function onUploadRvtools(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('file', file);
-  const r = await fetch('/api/upload', { method: 'POST', body: fd }).then((x) => x.json());
-  if (r.error) {
-    alert('Upload failed: ' + r.error);
-    return;
-  }
-
-  // Clear existing VMs and rebuild
-  state.vms = [];
-  $('#vmList').innerHTML = '';
-
-  for (const v of r.vms || []) {
-    const vm = {
-      id: uid(),
-      name: v.name,
-      vcpu: v.vcpu || 2,
-      ramGiB: v.ramGiB || 4,
-      os: v.os === 'windows' ? 'windows' : 'linux',
-      recommendedVm: null,
-      reservation: 'payg',
-      hybridBenefit: false,
-      publicIp: false,
-      disks: (v.disks && v.disks.length
-        ? v.disks
-        : [{ id: uid(), family: 'Standard SSD', sizeGiB: 128, role: 'OS' }]
-      ).map((d) => ({ id: uid(), family: d.family || 'Standard SSD', sizeGiB: d.sizeGiB || 128, role: d.label || '' })),
-      backup: null,
-    };
-    state.vms.push(vm);
-    renderVmCard(vm);
-  }
-  applyServiceVisibility();
-  e.target.value = '';
+function renderIpRow(row) {
+  const card = $('#ipRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const count = card.querySelector('.ip-count');
+  count.value = row.count;
+  count.addEventListener('change', () => { row.count = +count.value || 1; });
+  return card;
 }
 
-// ---------- Storage accounts ----------
-function addStorageAccount() {
-  const sa = {
-    id: uid(),
-    name: `storage-${state.storageAccounts.length + 1}`,
-    tier: 'Hot',
-    redundancy: 'LRS',
-    capacityGiB: 100,
+function renderBackupRow(row) {
+  const card = $('#backupRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const size = card.querySelector('.bk-size');
+  const policy = card.querySelector('.bk-policy');
+  const ret = card.querySelector('.bk-retention');
+  const red = card.querySelector('.bk-redundancy');
+  const churn = card.querySelector('.bk-churn');
+  size.value = row.sourceSizeGiB; policy.value = row.policy;
+  ret.value = row.retentionDays; red.value = row.redundancy; churn.value = row.dailyChurnPct;
+  size.addEventListener('change', () => { row.sourceSizeGiB = +size.value || 1; });
+  policy.addEventListener('change', () => { row.policy = policy.value; });
+  ret.addEventListener('change', () => { row.retentionDays = +ret.value || 30; });
+  red.addEventListener('change', () => { row.redundancy = red.value; });
+  churn.addEventListener('change', () => { row.dailyChurnPct = +churn.value || 0; });
+  return card;
+}
+
+function renderStorageRow(row) {
+  const card = $('#storageRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const tier = card.querySelector('.sa-tier');
+  const red = card.querySelector('.sa-redundancy');
+  const cap = card.querySelector('.sa-capacity');
+  tier.value = row.tier; red.value = row.redundancy; cap.value = row.capacityGiB;
+  tier.addEventListener('change', () => { row.tier = tier.value; });
+  red.addEventListener('change', () => { row.redundancy = red.value; });
+  cap.addEventListener('change', () => { row.capacityGiB = +cap.value || 0; });
+  return card;
+}
+
+// ---------- Add Backup from a VM ----------
+function onAddBackup(vm) {
+  // Replace any existing backup row pointing at this VM (one backup per VM).
+  state.rows = state.rows.filter((r) => !(r.type === 'backup' && r.parentVmId === vm.id));
+  const sourceSize = computeVmSourceSize(vm.id);
+  const prefill = {
+    name: `Backup - ${vm.name}`,
+    parentVmId: vm.id,
+    sourceSizeGiB: sourceSize,
   };
-  state.storageAccounts.push(sa);
-  renderStorageCard(sa);
-}
 
-function renderStorageCard(sa) {
-  const tpl = $('#storageCardTpl').content.cloneNode(true);
-  const card = tpl.querySelector('.vm-card');
-  card.dataset.saId = sa.id;
-  const nameInput = card.querySelector('.sa-name');
-  const tierSel = card.querySelector('.sa-tier');
-  const redSel = card.querySelector('.sa-redundancy');
-  const capInput = card.querySelector('.sa-capacity');
-
-  nameInput.value = sa.name;
-  tierSel.value = sa.tier;
-  redSel.value = sa.redundancy;
-  capInput.value = sa.capacityGiB;
-
-  nameInput.addEventListener('input', () => (sa.name = nameInput.value));
-  tierSel.addEventListener('change', () => (sa.tier = tierSel.value));
-  redSel.addEventListener('change', () => (sa.redundancy = redSel.value));
-  capInput.addEventListener('change', () => (sa.capacityGiB = Number(capInput.value) || 0));
-  card.querySelector('.sa-remove').addEventListener('click', () => {
-    state.storageAccounts = state.storageAccounts.filter((x) => x.id !== sa.id);
-    card.remove();
-  });
-  $('#storageList').appendChild(card);
-}
-
-// ---------- Backup modal ----------
-let backupTargetVm = null;
-let backupModalMode = 'vm'; // 'vm' = override one VM; 'defaults' = first-time setup
-
-function onBackupButton(vm) {
-  // 1. VM already has its own backup config → open modal to edit/override.
-  if (vm.backup && vm.backup.enabled) {
-    openBackupModal(vm, 'vm');
-    return;
-  }
-  // 2. No global defaults yet → first-time setup. Modal will store defaults + enable this VM.
   if (!state.backupDefaults) {
-    openBackupModal(vm, 'defaults');
+    // First-time setup: open the modal so the user picks defaults. After save we add
+    // the row beneath the originating VM.
+    openBackupModal('defaults', { vmName: vm.name, onSave: (defaults) => {
+      state.backupDefaults = defaults;
+      refreshBackupDefaultsBtn();
+      addRow('backup', prefill, vm.id);
+    } });
     return;
   }
-  // 3. Defaults exist → just enable this VM with a copy of them. No modal.
-  vm.backup = { ...state.backupDefaults, enabled: true };
-  vm._refreshBackupUi?.();
+  addRow('backup', prefill, vm.id);
 }
+
+function computeVmSourceSize(vmId) {
+  const vm = state.rows.find((r) => r.id === vmId);
+  if (!vm) return 128;
+  let total = vm.osDisk?.sizeGiB || 0;
+  for (const r of state.rows) {
+    if (r.type === 'disk' && r.attachedToVmId === vmId) total += r.sizeGiB || 0;
+  }
+  return total || 128;
+}
+
+// ---------- Backup defaults modal ----------
+let backupModalCtx = null; // { mode, onSave }
 
 function wireBackupModal() {
   $('#backupModalClose').addEventListener('click', closeBackupModal);
@@ -505,52 +486,28 @@ function wireBackupModal() {
   });
   $('#backupSaveBtn').addEventListener('click', () => {
     const cfg = {
-      enabled: true,
       policy: $('#backupPolicy').value,
-      retentionDays: Number($('#backupRetention').value) || 30,
+      retentionDays: +$('#backupRetention').value || 30,
       redundancy: $('#backupRedundancy').value,
-      dailyChurnPct: Number($('#backupChurn').value) || 5,
+      dailyChurnPct: +$('#backupChurn').value || 5,
     };
-    if (backupModalMode === 'defaults') {
-      // First-time setup: remember as the global defaults AND enable the originating VM.
-      state.backupDefaults = { ...cfg };
-      delete state.backupDefaults.enabled;
-      refreshBackupDefaultsBtn();
-    }
-    if (backupTargetVm) {
-      backupTargetVm.backup = cfg;
-      backupTargetVm._refreshBackupUi?.();
-    }
+    backupModalCtx?.onSave?.(cfg);
     closeBackupModal();
   });
-  $('#backupRemoveBtn').addEventListener('click', () => {
-    if (backupTargetVm) {
-      backupTargetVm.backup = null;
-      backupTargetVm._refreshBackupUi?.();
-    }
-    closeBackupModal();
-  });
-  // Escape key closes the modal.
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#backupModal').hidden) closeBackupModal();
   });
 }
 
-function openBackupModal(vm, mode = 'vm') {
-  backupTargetVm = vm;
-  backupModalMode = mode;
-  const seed =
-    vm.backup ||
-    state.backupDefaults ||
-    { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
-  $('#backupModalVmName').textContent =
-    mode === 'defaults' ? `Set Backup defaults (→ ${vm.name})` : vm.name;
+function openBackupModal(mode, ctx) {
+  backupModalCtx = { mode, ...ctx };
+  const seed = state.backupDefaults || { policy: 'daily', retentionDays: 30, redundancy: 'GRS', dailyChurnPct: 5 };
+  $('#backupModalVmName').textContent = mode === 'defaults' ? `defaults${ctx?.vmName ? ` → ${ctx.vmName}` : ''}` : 'edit';
   $('#backupModalSubtitle').textContent =
     mode === 'defaults'
-      ? 'These values will be reused as the default for every VM you enable Backup on. You can override them per VM later.'
-      : 'Override the Backup settings for this VM. Remove to disable Backup on this VM.';
-  $('#backupRemoveBtn').hidden = mode === 'defaults';
-  $('#backupSaveBtn').textContent = mode === 'defaults' ? 'Save defaults & enable' : 'Save';
+      ? 'These values will be reused as the default for every Backup you add. You can override them on any individual backup row later.'
+      : 'Edit the saved defaults. Existing backup rows are not changed.';
+  $('#backupSaveBtn').textContent = mode === 'defaults' ? 'Save defaults' : 'Save';
   $('#backupPolicy').value = seed.policy;
   $('#backupRetention').value = seed.retentionDays;
   $('#backupRedundancy').value = seed.redundancy;
@@ -560,50 +517,62 @@ function openBackupModal(vm, mode = 'vm') {
 
 function closeBackupModal() {
   $('#backupModal').hidden = true;
-  backupTargetVm = null;
-  backupModalMode = 'vm';
+  backupModalCtx = null;
+}
+
+function refreshBackupDefaultsBtn() {
+  $('#editBackupDefaultsBtn').hidden = !state.backupDefaults;
+}
+
+function editBackupDefaults() {
+  openBackupModal('defaults', { onSave: (cfg) => { state.backupDefaults = cfg; } });
+}
+
+// ---------- RVTools import ----------
+async function onUploadRvtools(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch('/api/upload', { method: 'POST', body: fd }).then((x) => x.json());
+  if (r.error) { alert('Upload failed: ' + r.error); return; }
+
+  state.rows = [];
+  for (const v of r.vms || []) {
+    const totalDisk = (v.disks && v.disks.length ? v.disks : [{ sizeGiB: 128 }])
+      .reduce((s, d) => s + (d.sizeGiB || 0), 0);
+    addRow('vm', {
+      name: v.name,
+      vcpu: v.vcpu || 2,
+      ramGiB: v.ramGiB || 4,
+      os: v.os === 'windows' ? 'windows' : 'linux',
+      osDiskFamily: 'Standard SSD',
+      osDiskSizeGiB: totalDisk || 128,
+    });
+  }
+  e.target.value = '';
 }
 
 // ---------- Estimate ----------
 async function runEstimate() {
-  const payload = {
-    region: state.region,
-    currency: state.currency,
-    vms: state.servicesEnabled.has('vm')
-      ? state.vms.map((vm) => ({
-          id: vm.id,
-          name: vm.name,
-          vcpu: vm.vcpu,
-          ramGiB: vm.ramGiB,
-          os: vm.os,
-          recommendedVm: vm.recommendedVm,
-          reservation: vm.reservation,
-          hybridBenefit: vm.hybridBenefit,
-          publicIp: state.servicesEnabled.has('pip') && vm.publicIp,
-          disks: state.servicesEnabled.has('disks')
-            ? vm.disks.map((d) => ({ family: d.family, sizeGiB: d.sizeGiB, sku: d.sku, role: d.role }))
-            : [],
-          backup: state.servicesEnabled.has('backup') ? vm.backup : null,
-        }))
-      : [],
-    storageAccounts: state.servicesEnabled.has('storage') ? state.storageAccounts : [],
-  };
-
-  const meta = $('#estimateMeta');
-  meta.textContent = 'Computing…';
+  const payload = { region: state.region, currency: state.currency, rows: state.rows };
+  const meta = $('#estimateMeta'); meta.textContent = 'Computing…';
   try {
     const r = await fetch('/api/azure/estimate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then((x) => x.json());
     if (r.error) throw new Error(r.error);
     state.lastEstimate = r;
     renderResults(r);
     meta.textContent = `Computed at ${new Date().toLocaleTimeString()}`;
-  } catch (e) {
-    meta.textContent = '';
-    alert('Estimate failed: ' + e.message);
+    updateRowCosts(r);
+  } catch (e) { meta.textContent = ''; alert('Estimate failed: ' + e.message); }
+}
+
+function updateRowCosts(r) {
+  for (const item of r.items) {
+    const card = document.querySelector(`.row-card[data-row-id="${item.id}"]`);
+    if (card) card.querySelector('.row-cost').textContent = fmt(item.monthly);
   }
 }
 
@@ -611,57 +580,26 @@ function renderResults(r) {
   const card = $('#resultsCard');
   card.hidden = false;
   $('#grandTotal').textContent = fmt(r.grandMonthly);
-  $('#resultsMeta').textContent = `${r.region} · ${r.currency} · ${r.vms.length} VM(s)${r.storageAccounts.length ? ` · ${r.storageAccounts.length} storage account(s)` : ''}`;
-
+  $('#resultsMeta').textContent = `${r.region} · ${r.currency} · ${r.items.length} row(s)`;
   const body = $('#resultsBody');
   body.innerHTML = '';
-
-  for (const vm of r.vms) {
+  for (const item of r.items) {
     const block = document.createElement('div');
-    block.className = 'result-vm';
-    const ahbTxt = vm.hybridBenefit ? ' · AHB' : '';
-    const resTxt = vm.reservation && vm.reservation !== 'payg' ? ` · ${vm.reservation.toUpperCase()} RI` : '';
+    block.className = 'result-row';
     block.innerHTML = `
-      <div class="result-vm-head">
-        <span class="name">${escapeHtml(vm.name)} <span class="muted">— ${vm.recommendedVm || 'no SKU'} · ${vm.os}${resTxt}${ahbTxt}</span></span>
-        <span class="total">${fmt(vm.monthly)}</span>
+      <div class="result-row-head">
+        <span class="name">${escapeHtml(item.name)} <span class="muted">(${item.type})</span></span>
+        <span class="total">${fmt(item.monthly)}</span>
       </div>
-      ${vm.lineItems
-        .map(
-          (li) => `
-            <div class="result-vm-line">
-              <strong>${escapeHtml(li.category)}</strong>
-              <span class="desc">${escapeHtml(li.detail || '')}</span>
-              <span class="amount">${fmt(li.amount)}</span>
-            </div>`
-        )
-        .join('')}
+      ${item.lineItems.map((li) => `
+        <div class="result-vm-line">
+          <strong>${escapeHtml(li.category)}</strong>
+          <span class="desc">${escapeHtml(li.detail || '')}</span>
+          <span class="amount">${fmt(li.amount)}</span>
+        </div>`).join('')}
     `;
     body.appendChild(block);
   }
-
-  for (const sa of r.storageAccounts) {
-    const block = document.createElement('div');
-    block.className = 'result-vm';
-    block.innerHTML = `
-      <div class="result-vm-head">
-        <span class="name">${escapeHtml(sa.name)} <span class="muted">— ${sa.tier} ${sa.redundancy} · ${sa.capacityGiB} GiB</span></span>
-        <span class="total">${fmt(sa.monthly)}</span>
-      </div>
-      ${sa.lineItems
-        .map(
-          (li) => `
-            <div class="result-vm-line">
-              <strong>${escapeHtml(li.category)}</strong>
-              <span class="desc">${escapeHtml(li.detail || '')}</span>
-              <span class="amount">${fmt(li.amount)}</span>
-            </div>`
-        )
-        .join('')}
-    `;
-    body.appendChild(block);
-  }
-
   const warns = $('#warningsBox');
   if (r.warnings && r.warnings.length) {
     warns.hidden = false;
