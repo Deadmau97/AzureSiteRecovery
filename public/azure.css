@@ -107,12 +107,14 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   transition: border-color .15s ease;
 }
 .row-card:hover { border-color: rgba(110, 168, 255, 0.4); }
-.row-card.row-backup {
+.row-card.row-backup,
+.row-card.row-child {
   margin-left: 28px;
   border-left: 3px solid var(--good);
   background: linear-gradient(180deg, rgba(70, 211, 154, 0.04), transparent 60%), var(--panel);
 }
-.row-card.row-backup::before {
+.row-card.row-backup::before,
+.row-card.row-child::before {
   content: "";
   position: absolute;
   left: -22px; top: 28px;

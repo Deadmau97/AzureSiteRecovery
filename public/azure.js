@@ -522,6 +522,10 @@ function commonWire(card, row) {
   card.dataset.rowId = row.id;
   if (state.collapsedAll) card.classList.add('collapsed');
   if (state.reorderMode) card.classList.add('reorder');
+  // Visually mark rows that hang off another row as a child (green left stripe).
+  // VM → Backup uses the .row-backup class baked into the template; for VPN → IP
+  // and NAT → IP we set .row-child here so a standalone IP row stays neutral.
+  if (row.parentVpnId || row.parentNatId) card.classList.add('row-child');
 
   const removeBtn = card.querySelector('.row-remove');
   // Inject up/down/copy controls in front of the remove button.
@@ -616,6 +620,52 @@ function renderVmRow(row) {
   }));
   skuSel.addEventListener('change', () => { row.recommendedVm = skuSel.value || null; schedulePreview(); });
   addBackupBtn.addEventListener('click', () => onAddBackup(row));
+
+  // ---------- SKU search (free-text browse including GPU / HPC / M-series) ----------
+  // When the search box has text we hit /api/vm-search?q=... and rebuild the SKU
+  // dropdown with the matches. When it's empty, fall back to vCPU/RAM-based
+  // recommendations from /api/recommend. Debounced 200 ms.
+  const skuSearch = card.querySelector('.vm-sku-search');
+  if (skuSearch) {
+    skuSearch.value = row.skuSearch || '';
+    let searchTimer = null;
+    const runSearch = async () => {
+      const q = skuSearch.value.trim();
+      row.skuSearch = q;
+      if (!q) { refreshRecommendations(row, skuSel); return; }
+      try {
+        const list = await fetch(`/api/vm-search?q=${encodeURIComponent(q)}&includeSpecialty=true`).then((x) => x.json());
+        skuSel.innerHTML = '';
+        if (!Array.isArray(list) || list.length === 0) {
+          const opt = document.createElement('option'); opt.value = ''; opt.textContent = 'No SKU matches';
+          skuSel.appendChild(opt);
+          row.recommendedVm = null;
+          schedulePreview();
+          return;
+        }
+        for (const v of list) {
+          const opt = document.createElement('option');
+          opt.value = v.armSkuName;
+          const tag = v.specialty ? ' ★' : '';
+          opt.textContent = `${v.armSkuName}${tag} — ${v.vcpu}v / ${v.ramGiB}GiB`;
+          skuSel.appendChild(opt);
+        }
+        // Preserve the current selection if it still matches; otherwise pick the first.
+        if (row.recommendedVm && list.some((x) => x.armSkuName === row.recommendedVm)) {
+          skuSel.value = row.recommendedVm;
+        } else {
+          skuSel.value = list[0].armSkuName;
+          row.recommendedVm = list[0].armSkuName;
+        }
+        schedulePreview();
+      } catch (e) { console.error('vm-search error', e); }
+    };
+    skuSearch.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(runSearch, 200);
+    });
+    if (row.skuSearch) runSearch();
+  }
   addDiskBtn.addEventListener('click', () => {
     const d = state.defaults;
     const disk = { id: uid(), label: `Data disk ${row.disks.length}`, family: d.dataDiskFamily, sizeGiB: d.dataDiskSize, sku: null };

@@ -311,6 +311,10 @@
               </div>
             </label>
             <label class="field-flat"><span>VM SKU</span><select class="vm-sku"></select></label>
+            <label class="field-flat vm-sku-search-wrap"><span>Find SKU (e.g. NC4 / D4s / GPU)</span>
+              <input type="search" class="vm-sku-search" placeholder="Type to search any Azure VM SKU…" autocomplete="off" />
+              <small class="muted">Leave empty to use vCPU/RAM-based recommendations. Type to browse all SKUs incl. GPU / HPC.</small>
+            </label>
             <label class="field-flat"><span>Reservation</span>
               <select class="vm-reservation">
                 <option value="payg">Pay-as-you-go</option>
