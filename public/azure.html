@@ -53,6 +53,10 @@
           <span>Currency</span>
           <select id="currencySelect"></select>
         </label>
+        <label class="field-flat" title="Partner discount applied to PAYG line items only (reservations are unaffected). Visible in the partner view only.">
+          <span>Discount %</span>
+          <input type="number" id="discountPct" min="0" max="100" step="0.5" value="0" />
+        </label>
         <button class="btn ghost" id="refreshPricesBtn" title="Re-warm Retail Prices cache">Refresh prices</button>
         <button class="btn primary" id="estimateBtn" title="Calculate monthly cost and view the results page">
           Calculate &amp; review
@@ -113,7 +117,8 @@
       <div class="results-bar">
         <button class="btn ghost" id="backToBuilderBtn">← Back to builder</button>
         <div class="results-bar-right">
-          <button class="btn ghost" id="downloadPdfBtn">Download PDF</button>
+          <button class="btn ghost" id="downloadPdfPartnerBtn" title="Includes discount, partner cost column and charts">Download Partner PDF</button>
+          <button class="btn ghost" id="downloadPdfCustomerBtn" title="Customer-facing report — no discount information">Download Customer PDF</button>
           <span class="grand-total" id="grandTotal">—</span>
         </div>
       </div>
@@ -127,18 +132,9 @@
         </div>
         <div class="warnings" id="warningsBox" hidden></div>
 
-        <div class="charts-row">
-          <div class="chart-card">
-            <h3>Cost by service type</h3>
-            <canvas id="chartByType" height="220"></canvas>
-          </div>
-          <div class="chart-card">
-            <h3>Top items (monthly)</h3>
-            <canvas id="chartByItem" height="220"></canvas>
-          </div>
-        </div>
-
-        <!-- Reservation / Hybrid Benefit scenario comparison -->
+        <!-- Reservation / Hybrid Benefit scenario comparison — always shown
+             at the top of the results page so users see the cheapest option
+             before the per-service breakdown. -->
         <div class="chart-card scenario-card">
           <div class="scenario-head">
             <h3>What-if: PAYG vs 3-Year RI vs RI + Hybrid Benefit</h3>
@@ -151,6 +147,17 @@
           </div>
           <canvas id="chartScenarios" height="180"></canvas>
           <div id="scenarioSummary" class="scenario-summary"></div>
+        </div>
+
+        <div class="charts-row">
+          <div class="chart-card">
+            <h3>Cost by service type</h3>
+            <canvas id="chartByType" height="220"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Top items (monthly)</h3>
+            <canvas id="chartByItem" height="220"></canvas>
+          </div>
         </div>
 
         <div id="resultsBody"></div>

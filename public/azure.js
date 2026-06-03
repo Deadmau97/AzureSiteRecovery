@@ -71,6 +71,10 @@ const FACTORY_DEFAULTS = {
 const state = {
   region: null,
   currency: 'EUR',
+  // Partner discount (%) applied to PAYG line items only. Reservations are
+  // contractually fixed so they are never discounted. Read from the input next
+  // to the Region selector.
+  discountPct: 0,
   rows: [],
   diskTiers: { 'Standard SSD': [], 'Premium SSD': [] },
   diskPrices: { 'Standard SSD': {}, 'Premium SSD': {} },
@@ -102,10 +106,29 @@ async function init() {
   await loadServiceCatalogs();
   renderServices();
   wireToolbar();
+  wireDiscount();
   wireDefaultsModal();
   wireResultsView();
   pollStatus();
   applyEmptyState();
+}
+
+// Live-bind the partner discount input so any change re-renders the results
+// page (when visible) without re-running the estimate.
+function wireDiscount() {
+  const el = $('#discountPct');
+  if (!el) return;
+  const apply = () => {
+    const v = Math.max(0, Math.min(100, Number(el.value) || 0));
+    state.discountPct = v;
+    if (state.lastEstimate && !$('#resultsView').hidden) {
+      // Re-render results body + grand total to reflect the new discount
+      // without re-fetching prices.
+      renderResultsBody(state.lastEstimate);
+    }
+  };
+  el.addEventListener('input', apply);
+  el.addEventListener('change', apply);
 }
 
 function wireDisclaimer() {
@@ -1127,7 +1150,29 @@ function wireResultsView() {
     $('#builderView').hidden = false;
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
-  $('#downloadPdfBtn').addEventListener('click', downloadEstimatePdf);
+  $('#downloadPdfPartnerBtn').addEventListener('click', () => downloadEstimatePdf('partner'));
+  $('#downloadPdfCustomerBtn').addEventListener('click', () => downloadEstimatePdf('customer'));
+}
+
+// Helpers — partner-cost math used by both the table and the PDF.
+function discountFactor() {
+  const d = Math.max(0, Math.min(100, Number(state.discountPct) || 0));
+  return 1 - d / 100;
+}
+function partnerAmount(li) {
+  return li.billing === 'reservation' ? li.amount : li.amount * discountFactor();
+}
+function itemPartnerMonthly(item) {
+  const f = discountFactor();
+  const payg = Number(item.paygMonthly) || 0;
+  const res = Number(item.reservationMonthly) || 0;
+  return payg * f + res;
+}
+function grandPartnerMonthly(r) {
+  const f = discountFactor();
+  const payg = Number(r.grandPayg) || 0;
+  const res = Number(r.grandReservation) || 0;
+  return payg * f + res;
 }
 
 async function runEstimate() {
@@ -1157,27 +1202,14 @@ function showResultsView(r) {
   $('#resultsView').hidden = false;
   window.scrollTo({ top: 0 });
 
-  $('#grandTotal').textContent = fmt(r.grandMonthly);
+  // Sync the discount input from state so reloads / programmatic changes
+  // stay reflected.
+  const dEl = $('#discountPct');
+  if (dEl && Number(dEl.value) !== Number(state.discountPct)) dEl.value = state.discountPct;
+
   $('#resultsMeta').textContent = `${r.region} · ${r.currency} · ${r.items.length} row(s)`;
-  const body = $('#resultsBody');
-  body.innerHTML = '';
-  for (const item of r.items) {
-    const block = document.createElement('div');
-    block.className = 'result-row';
-    block.innerHTML = `
-      <div class="result-row-head">
-        <span class="name">${escapeHtml(item.name)} <span class="muted">(${item.type})</span></span>
-        <span class="total">${fmt(item.monthly)}</span>
-      </div>
-      ${item.lineItems.map((li) => `
-        <div class="result-vm-line">
-          <strong>${escapeHtml(li.category)}</strong>
-          <span class="desc">${escapeHtml(li.detail || '')}</span>
-          <span class="amount">${fmt(li.amount)}</span>
-        </div>`).join('')}
-    `;
-    body.appendChild(block);
-  }
+  renderResultsBody(r);
+
   const warns = $('#warningsBox');
   if (r.warnings && r.warnings.length) {
     warns.hidden = false;
@@ -1186,6 +1218,57 @@ function showResultsView(r) {
     warns.hidden = true;
   }
   renderCharts(r);
+}
+
+// Render only the line-item table + grand total. Called by `showResultsView`
+// on a fresh estimate and by the discount input listener on every change.
+function renderResultsBody(r) {
+  const f = discountFactor();
+  const showPartner = state.discountPct > 0;
+
+  // Grand total — list price always shown; partner total appended when a
+  // discount is configured.
+  const partnerGrand = grandPartnerMonthly(r);
+  if (showPartner) {
+    $('#grandTotal').innerHTML = `
+      <span class="grand-list">${escapeHtml(fmt(r.grandMonthly))}</span>
+      <span class="grand-partner" title="Partner cost (after ${state.discountPct}% PAYG discount)">
+        Partner: ${escapeHtml(fmt(partnerGrand))}
+      </span>`;
+  } else {
+    $('#grandTotal').textContent = fmt(r.grandMonthly);
+  }
+
+  const body = $('#resultsBody');
+  body.innerHTML = '';
+  for (const item of r.items) {
+    const block = document.createElement('div');
+    block.className = 'result-row';
+    const itemPartner = itemPartnerMonthly(item);
+    const head = `
+      <div class="result-row-head">
+        <span class="name">${escapeHtml(item.name)} <span class="muted">(${item.type})</span></span>
+        <span class="total">
+          ${escapeHtml(fmt(item.monthly))}
+          ${showPartner ? `<span class="partner-amount" title="Partner cost">${escapeHtml(fmt(itemPartner))}</span>` : ''}
+        </span>
+      </div>`;
+    const lines = item.lineItems.map((li) => {
+      const partner = partnerAmount(li);
+      const billingTag = li.billing === 'reservation'
+        ? '<span class="pill billing-ri" title="Reserved Instance — not eligible for partner discount">RI</span>'
+        : '<span class="pill billing-payg" title="Pay-as-you-go — partner discount applies">PAYG</span>';
+      return `
+        <div class="result-vm-line">
+          <strong>${escapeHtml(li.category)} ${billingTag}</strong>
+          <span class="desc">${escapeHtml(li.detail || '')}</span>
+          <span class="amount">${escapeHtml(fmt(li.amount))}</span>
+          ${showPartner ? `<span class="partner-amount">${escapeHtml(fmt(partner))}</span>` : ''}
+        </div>`;
+    }).join('');
+    block.innerHTML = head + lines;
+    body.appendChild(block);
+  }
 }
 
 let chartByType = null;
@@ -1324,75 +1407,179 @@ async function renderScenarioChart() {
   summary.innerHTML = lines;
 }
 
-function downloadEstimatePdf() {
+// Snapshot a chart canvas to a PNG data URL, sized for embedding in pdfmake.
+// Returns null if the canvas is missing or cannot be exported.
+function chartImage(id) {
+  try {
+    const c = document.getElementById(id);
+    if (!c || !c.toDataURL) return null;
+    return c.toDataURL('image/png', 1.0);
+  } catch (_) { return null; }
+}
+
+// Build and download the estimate PDF. The `view` argument decides whether
+// the partner discount and the partner-cost column are visible:
+//   - 'partner'  \u2192 includes discount header, Partner column on every table,
+//                 and the embedded charts.
+//   - 'customer' \u2192 list prices only, no discount info, charts still embedded.
+function downloadEstimatePdf(view) {
   if (typeof pdfMake === 'undefined') { alert('PDF library not loaded.'); return; }
   const data = state.lastEstimate;
   if (!data) return;
-  const filename = `azure-estimate-${data.region}-${new Date().toISOString().slice(0, 10)}.pdf`;
+  const isPartner = view === 'partner';
+  const showPartnerCol = isPartner && state.discountPct > 0;
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const filename = `azure-estimate-${isPartner ? 'partner' : 'customer'}-${data.region}-${dateStr}.pdf`;
 
+  // Capture chart images first (before any layout work) so we don't accidentally
+  // capture them while they are being torn down.
+  const imgScenarios = chartImage('chartScenarios');
+  const imgByType = chartImage('chartByType');
+  const imgByItem = chartImage('chartByItem');
+
+  // Summary table (one row per item).
+  const summaryHead = showPartnerCol
+    ? [
+      { text: 'Item', style: 'th' },
+      { text: 'Type', style: 'th' },
+      { text: 'Monthly (list)', style: 'th', alignment: 'right' },
+      { text: 'Partner', style: 'th', alignment: 'right' },
+    ]
+    : [
+      { text: 'Item', style: 'th' },
+      { text: 'Type', style: 'th' },
+      { text: 'Monthly', style: 'th', alignment: 'right' },
+    ];
   const itemsRows = [
-    [{ text: 'Item', style: 'th' }, { text: 'Type', style: 'th' }, { text: 'Monthly', style: 'th', alignment: 'right' }],
-    ...data.items.map((i) => [
-      { text: i.name, style: 'td' },
-      { text: i.type, style: 'td' },
-      { text: fmt(i.monthly), style: 'td', alignment: 'right' },
-    ]),
-    [
-      { text: 'TOTAL', style: 'tdBold', colSpan: 2 }, {},
-      { text: fmt(data.grandMonthly), style: 'tdBold', alignment: 'right' },
-    ],
+    summaryHead,
+    ...data.items.map((i) => {
+      const base = [
+        { text: i.name, style: 'td' },
+        { text: i.type, style: 'td' },
+        { text: fmt(i.monthly), style: 'td', alignment: 'right' },
+      ];
+      if (showPartnerCol) base.push({ text: fmt(itemPartnerMonthly(i)), style: 'td', alignment: 'right' });
+      return base;
+    }),
+    showPartnerCol
+      ? [
+        { text: 'TOTAL', style: 'tdBold', colSpan: 2 }, {},
+        { text: fmt(data.grandMonthly), style: 'tdBold', alignment: 'right' },
+        { text: fmt(grandPartnerMonthly(data)), style: 'tdBold', alignment: 'right' },
+      ]
+      : [
+        { text: 'TOTAL', style: 'tdBold', colSpan: 2 }, {},
+        { text: fmt(data.grandMonthly), style: 'tdBold', alignment: 'right' },
+      ],
   ];
+  const summaryWidths = showPartnerCol ? ['*', 70, 80, 80] : ['*', 80, 80];
 
+  // Per-item line breakdown.
   const lineItemSections = data.items.flatMap((i) => {
     if (!i.lineItems.length) return [];
+    const lineHead = showPartnerCol
+      ? [
+        { text: 'Category', style: 'th' },
+        { text: 'Detail', style: 'th' },
+        { text: 'Billing', style: 'th', alignment: 'center' },
+        { text: 'Amount', style: 'th', alignment: 'right' },
+        { text: 'Partner', style: 'th', alignment: 'right' },
+      ]
+      : isPartner
+        ? [
+          { text: 'Category', style: 'th' },
+          { text: 'Detail', style: 'th' },
+          { text: 'Billing', style: 'th', alignment: 'center' },
+          { text: 'Amount', style: 'th', alignment: 'right' },
+        ]
+        : [
+          { text: 'Category', style: 'th' },
+          { text: 'Detail', style: 'th' },
+          { text: 'Amount', style: 'th', alignment: 'right' },
+        ];
+    const lineRows = i.lineItems.map((li) => {
+      const billingTxt = li.billing === 'reservation' ? 'RI' : 'PAYG';
+      if (showPartnerCol) return [
+        { text: li.category, style: 'td' },
+        { text: li.detail || '', style: 'td' },
+        { text: billingTxt, style: 'td', alignment: 'center' },
+        { text: fmt(li.amount), style: 'td', alignment: 'right' },
+        { text: fmt(partnerAmount(li)), style: 'td', alignment: 'right' },
+      ];
+      if (isPartner) return [
+        { text: li.category, style: 'td' },
+        { text: li.detail || '', style: 'td' },
+        { text: billingTxt, style: 'td', alignment: 'center' },
+        { text: fmt(li.amount), style: 'td', alignment: 'right' },
+      ];
+      return [
+        { text: li.category, style: 'td' },
+        { text: li.detail || '', style: 'td' },
+        { text: fmt(li.amount), style: 'td', alignment: 'right' },
+      ];
+    });
+    const widths = showPartnerCol ? ['*', '*', 40, 70, 70]
+      : isPartner ? ['*', '*', 40, 80]
+      : ['*', '*', 80];
+    const heading = showPartnerCol
+      ? `${i.name} (${i.type}) \u2014 ${fmt(i.monthly)}  /  Partner ${fmt(itemPartnerMonthly(i))}`
+      : `${i.name} (${i.type}) \u2014 ${fmt(i.monthly)}`;
     return [
-      { text: `${i.name} (${i.type}) — ${fmt(i.monthly)}`, style: 'h3', margin: [0, 10, 0, 4] },
+      { text: heading, style: 'h3', margin: [0, 10, 0, 4] },
       {
-        table: {
-          widths: ['*', '*', 80],
-          body: [
-            [
-              { text: 'Category', style: 'th' },
-              { text: 'Detail', style: 'th' },
-              { text: 'Amount', style: 'th', alignment: 'right' },
-            ],
-            ...i.lineItems.map((li) => [
-              { text: li.category, style: 'td' },
-              { text: li.detail || '', style: 'td' },
-              { text: fmt(li.amount), style: 'td', alignment: 'right' },
-            ]),
-          ],
-        },
+        table: { widths, body: [lineHead, ...lineRows] },
         layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' },
       },
     ];
   });
 
+  // Charts \u2014 the scenario chart is always placed first per the partner spec.
+  // pdfmake renders images by data URL when given { image: 'data:...' }.
+  const chartBlock = (img, caption) => img ? [
+    { image: img, width: 500, margin: [0, 6, 0, 4] },
+    { text: caption, style: 'sub', margin: [0, 0, 0, 10] },
+  ] : [];
+  const chartsSection = [
+    { text: 'Cost scenarios & breakdown', style: 'h2', margin: [0, 14, 0, 6] },
+    ...chartBlock(imgScenarios, 'PAYG vs 3-Year RI vs RI + Hybrid Benefit (top chart)'),
+    ...chartBlock(imgByType, 'Cost by service type'),
+    ...chartBlock(imgByItem, 'Top items by monthly cost'),
+  ];
+
+  // Meta header rows.
+  const metaBody = [
+    [{ text: 'Region', style: 'metaKey' }, { text: data.region, style: 'metaVal' }],
+    [{ text: 'Currency', style: 'metaKey' }, { text: data.currency, style: 'metaVal' }],
+    [{ text: 'Rows', style: 'metaKey' }, { text: String(data.items.length), style: 'metaVal' }],
+    [{ text: 'Grand total', style: 'metaKey' }, { text: fmt(data.grandMonthly), style: 'metaVal' }],
+  ];
+  if (showPartnerCol) {
+    metaBody.push([{ text: 'Discount (PAYG)', style: 'metaKey' }, { text: `${state.discountPct}%`, style: 'metaVal' }]);
+    metaBody.push([{ text: 'Partner total', style: 'metaKey' }, { text: fmt(grandPartnerMonthly(data)), style: 'metaVal' }]);
+  }
+
+  const title = isPartner ? 'Azure Calculator \u2014 Partner Estimate' : 'Azure Calculator \u2014 Customer Estimate';
+  const subtitle = isPartner
+    ? (state.discountPct > 0
+        ? `Generated ${new Date().toLocaleString()} \u00b7 Partner view (${state.discountPct}% PAYG discount applied)`
+        : `Generated ${new Date().toLocaleString()} \u00b7 Partner view (no discount configured)`)
+    : `Generated ${new Date().toLocaleString()} \u00b7 Customer view`;
+
   const doc = {
     pageMargins: [40, 50, 40, 50],
     content: [
-      { text: 'Azure Calculator — Estimate', style: 'h1' },
-      { text: `Generated ${new Date().toLocaleString()}`, style: 'sub', margin: [0, 0, 0, 10] },
-      {
-        table: {
-          widths: [80, '*'],
-          body: [
-            [{ text: 'Region', style: 'metaKey' }, { text: data.region, style: 'metaVal' }],
-            [{ text: 'Currency', style: 'metaKey' }, { text: data.currency, style: 'metaVal' }],
-            [{ text: 'Rows', style: 'metaKey' }, { text: String(data.items.length), style: 'metaVal' }],
-            [{ text: 'Grand total', style: 'metaKey' }, { text: fmt(data.grandMonthly), style: 'metaVal' }],
-          ],
-        },
-        layout: 'noBorders', margin: [0, 0, 0, 14],
-      },
-      { text: 'Summary', style: 'h2' },
-      { table: { headerRows: 1, widths: ['*', 80, 80], body: itemsRows }, layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' } },
+      { text: title, style: 'h1' },
+      { text: subtitle, style: 'sub', margin: [0, 0, 0, 10] },
+      { table: { widths: [110, '*'], body: metaBody }, layout: 'noBorders', margin: [0, 0, 0, 10] },
+      ...chartsSection,
+      { text: 'Summary', style: 'h2', margin: [0, 14, 0, 6] },
+      { table: { headerRows: 1, widths: summaryWidths, body: itemsRows }, layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' } },
       { text: 'Per-item breakdown', style: 'h2', margin: [0, 16, 0, 6] },
       ...lineItemSections,
       ...(data.warnings && data.warnings.length
         ? [{ text: 'Warnings', style: 'h2', margin: [0, 14, 0, 6] }, { ul: data.warnings, style: 'td' }]
         : []),
-      { text: 'Estimates only — derived from public Azure Retail Prices. Real invoices may differ.', style: 'sub', margin: [0, 18, 0, 0] },
+      { text: 'Estimates only \u2014 derived from public Azure Retail Prices. Real invoices may differ.', style: 'sub', margin: [0, 18, 0, 0] },
     ],
     styles: {
       h1: { fontSize: 18, bold: true, color: '#1a2347' },

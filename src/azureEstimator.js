@@ -65,12 +65,17 @@ export function estimateAzure(input) {
               const m = part.hourly * hours;
               monthly += m;
               const isLicense = /license/i.test(part.label);
+              // Compute is reservation-billed when the VM has a 1y/3y term; the
+              // Windows OS license adder is always PAYG (RI on the API is
+              // compute-only, the license is billed pay-as-you-go on top).
+              const billing = isLicense ? 'payg' : (isPayg ? 'payg' : 'reservation');
               lineItems.push({
                 category: isLicense ? 'Windows OS license' : 'Compute',
                 detail: isLicense
                   ? `${row.recommendedVm} \u2014 ${part.label}${uptimeDetail}`
                   : `${row.recommendedVm} \u2014 ${os} \u2014 ${eff.detail}${eff.hybridBenefit && os === 'windows' ? ' (AHB applied)' : ''}${uptimeDetail}`,
                 amount: m,
+                billing,
               });
             }
           } else {
@@ -335,6 +340,17 @@ export function estimateAzure(input) {
         warnings.push(`Unknown row type: ${row.type}`);
     }
 
+    // Default any line items that didn't explicitly set a billing kind to PAYG.
+    // All non-VM services (disks, IPs, backup, storage, files, VPN, NAT, app
+    // service) are billed pay-as-you-go on the Retail Prices API.
+    let paygMonthly = 0;
+    let reservationMonthly = 0;
+    for (const li of lineItems) {
+      if (!li.billing) li.billing = 'payg';
+      if (li.billing === 'reservation') reservationMonthly += li.amount;
+      else paygMonthly += li.amount;
+    }
+
     grandMonthly += monthly;
     items.push({
       id: row.id,
@@ -342,9 +358,24 @@ export function estimateAzure(input) {
       name: row.name,
       parentVmId: row.parentVmId || null,
       monthly,
+      paygMonthly,
+      reservationMonthly,
       lineItems,
     });
   }
 
-  return { region: armRegionName, currency, grandMonthly, items, warnings };
+  // Aggregated grand totals split by billing kind so the frontend can apply
+  // partner discounts to the PAYG portion only.
+  const grandPayg = items.reduce((s, i) => s + (i.paygMonthly || 0), 0);
+  const grandReservation = items.reduce((s, i) => s + (i.reservationMonthly || 0), 0);
+
+  return {
+    region: armRegionName,
+    currency,
+    grandMonthly,
+    grandPayg,
+    grandReservation,
+    items,
+    warnings,
+  };
 }
