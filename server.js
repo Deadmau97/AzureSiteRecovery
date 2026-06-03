@@ -26,6 +26,8 @@ import {
   findAsrPrice,
   listVpnGatewaySkus,
   listAppServicePlanSkus,
+  listNatGatewaySkus,
+  listPublicIpSkus,
 } from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -128,6 +130,18 @@ app.get('/api/azure/appservice-skus', (req, res) => {
   const { region, currency } = req.query;
   if (!region) return res.status(400).json({ error: 'region is required' });
   res.json(listAppServicePlanSkus(currency || 'EUR', region));
+});
+
+app.get('/api/azure/nat-skus', (req, res) => {
+  const { currency } = req.query;
+  // NAT Gateway prices are not regional; they are published as armRegionName='Global'.
+  res.json(listNatGatewaySkus(currency || 'EUR'));
+});
+
+app.get('/api/azure/publicip-skus', (req, res) => {
+  const { region, currency } = req.query;
+  if (!region) return res.status(400).json({ error: 'region is required' });
+  res.json(listPublicIpSkus(currency || 'EUR', region));
 });
 
 // Debug: resolved monthly price for every disk tier in a region.

@@ -91,7 +91,10 @@
     <section class="rows-section">
       <div class="rows-toolbar">
         <h2>Configured items</h2>
-        <button class="btn ghost btn-sm" id="toggleCollapseAllBtn" title="Collapse or expand every row">Collapse all</button>
+        <div class="rows-toolbar-actions">
+          <button class="btn ghost btn-sm" id="toggleReorderBtn" title="Reorder items by moving them up/down">Reorder</button>
+          <button class="btn ghost btn-sm" id="toggleCollapseAllBtn" title="Collapse or expand every row">Collapse all</button>
+        </div>
       </div>
       <div id="rowsList" class="rows-list"></div>
       <div class="empty-state" id="emptyState">
@@ -380,7 +383,7 @@
         <div class="row-body">
           <div class="row-fields">
             <label class="field-flat"><span>Count</span><input type="number" class="ip-count" min="1" value="1" /></label>
-            <span class="field-flat note"><span>SKU</span><span class="muted">Standard Static IPv4</span></span>
+            <label class="field-flat"><span>SKU</span><select class="ip-sku"></select></label>
           </div>
         </div>
       </article>
@@ -441,9 +444,11 @@
           <div class="row-fields">
             <label class="field-flat"><span>Tier</span>
               <select class="sa-tier">
-                <option value="Hot" selected>Hot</option>
-                <option value="Cool">Cool</option>
+                <option value="Hot" selected>Hot (Standard v2)</option>
+                <option value="Cool">Cool (Standard v2)</option>
+                <option value="Cold">Cold (Standard v2)</option>
                 <option value="Archive">Archive</option>
+                <option value="Premium">Premium Block Blob</option>
               </select>
             </label>
             <label class="field-flat"><span>Redundancy</span>
@@ -454,6 +459,8 @@
               </select>
             </label>
             <label class="field-flat"><span>Capacity (GiB)</span><input type="number" class="sa-capacity" min="0" value="100" /></label>
+            <label class="field-flat"><span>Write ops / mo (×10K)</span><input type="number" class="sa-write-ops" min="0" value="0" title="Number of write operations per month, in units of 10\u202f000" /></label>
+            <label class="field-flat"><span>Read ops / mo (×10K)</span><input type="number" class="sa-read-ops" min="0" value="0" title="Number of read operations per month, in units of 10\u202f000" /></label>
           </div>
         </div>
       </article>
@@ -478,6 +485,13 @@
             <label class="field-flat"><span>SKU</span><select class="vpn-sku"></select></label>
             <span class="field-flat note"><span>Billing</span><span class="muted">Hourly × 730</span></span>
           </div>
+          <footer class="row-foot">
+            <label class="field-flat toggle-row">
+              <span>Include Public IP</span>
+              <label class="switch"><input type="checkbox" class="vpn-pip" /><span class="slider"></span></label>
+            </label>
+            <label class="field-flat vpn-pip-sku-wrap" hidden><span>Public IP SKU</span><select class="vpn-pip-sku"></select></label>
+          </footer>
         </div>
       </article>
     </template>
@@ -498,22 +512,29 @@
         </header>
         <div class="row-body">
           <div class="row-fields">
+            <label class="field-flat"><span>SKU</span><select class="nat-sku"></select></label>
             <label class="field-flat"><span>Data processed (GiB/mo)</span><input type="number" class="nat-data" min="0" value="100" /></label>
-            <span class="field-flat note"><span>Billing</span><span class="muted">Hourly fee + data</span></span>
           </div>
+          <footer class="row-foot">
+            <label class="field-flat toggle-row">
+              <span>Include Public IP</span>
+              <label class="switch"><input type="checkbox" class="nat-pip" /><span class="slider"></span></label>
+            </label>
+            <label class="field-flat nat-pip-sku-wrap" hidden><span>Public IP SKU</span><select class="nat-pip-sku"></select></label>
+          </footer>
         </div>
       </article>
     </template>
 
-    <!-- App Service Plan row -->
-    <template id="appserviceRowTpl">
-      <article class="row-card" data-type="appservice">
+    <!-- Azure Files row -->
+    <template id="filesRowTpl">
+      <article class="row-card" data-type="files">
         <header class="row-head">
           <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
             <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
           </button>
-          <img class="row-icon" src="/icons/compute/10035-icon-service-App-Services.svg" alt="App Service Plan" />
-          <input class="field-flat row-name" placeholder="App Service Plan name" />
+          <img class="row-icon" src="/icons/storage/10400-icon-service-Azure-Fileshares.svg" alt="Azure Files" />
+          <input class="field-flat row-name" placeholder="File share name" />
           <span class="row-cost muted">—</span>
           <button class="icon-btn row-remove" title="Remove" aria-label="Remove">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
@@ -521,8 +542,23 @@
         </header>
         <div class="row-body">
           <div class="row-fields">
-            <label class="field-flat"><span>SKU</span><select class="app-sku"></select></label>
-            <label class="field-flat"><span>Instances</span><input type="number" class="app-instances" min="1" value="1" /></label>
+            <label class="field-flat"><span>Tier</span>
+              <select class="af-tier">
+                <option value="Hot" selected>Hot (Standard v2)</option>
+                <option value="Cool">Cool (Standard v2)</option>
+                <option value="Standard">Transaction Optimized (legacy)</option>
+                <option value="Premium">Premium (provisioned)</option>
+              </select>
+            </label>
+            <label class="field-flat"><span>Redundancy</span>
+              <select class="af-redundancy">
+                <option value="LRS" selected>LRS</option>
+                <option value="GRS">GRS</option>
+                <option value="ZRS">ZRS</option>
+                <option value="GZRS">GZRS</option>
+              </select>
+            </label>
+            <label class="field-flat"><span>Capacity (GiB)</span><input type="number" class="af-capacity" min="0" value="100" /></label>
           </div>
         </div>
       </article>

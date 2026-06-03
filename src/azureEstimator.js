@@ -7,9 +7,12 @@ import {
   findVmEffectiveHourly,
   findDiskPrice,
   findStandardPublicIpPricePerHour,
+  findPublicIpPriceBySku,
   findBackupProtectedInstanceMonthly,
   findBackupStoragePricePerGiBMonth,
   findBlobStoragePricePerGiBMonth,
+  findBlobOperationsPricePer10K,
+  findAzureFilesPricePerGiBMonth,
   findVpnGatewayPrice,
   findNatGatewayPrice,
   findAppServicePlanPrice,
@@ -101,18 +104,20 @@ export function estimateAzure(input) {
       }
 
       case 'ip': {
-        const ip = findStandardPublicIpPricePerHour(currency, armRegionName);
+        const skuName = row.skuName || 'Standard';
+        const ip = findPublicIpPriceBySku(currency, armRegionName, skuName)
+          || findStandardPublicIpPricePerHour(currency, armRegionName);
         const count = Math.max(1, Number(row.count) || 1);
         if (ip) {
           const m = ip.retailPrice * HOURS_PER_MONTH * count;
           monthly += m;
           lineItems.push({
             category: 'Public IP',
-            detail: `${count} \u00d7 Standard Static IPv4`,
+            detail: `${count} \u00d7 ${skuName} Static IPv4`,
             amount: m,
           });
         } else {
-          warnings.push(`No Standard Public IP price for ${armRegionName}/${currency}.`);
+          warnings.push(`No ${skuName} Public IP price for ${armRegionName}/${currency}.`);
         }
         break;
       }
@@ -169,6 +174,41 @@ export function estimateAzure(input) {
         } else if (!sp) {
           warnings.push(`No ${row.tier}/${row.redundancy} blob storage price for ${armRegionName}/${currency}.`);
         }
+        const writeOps10K = Math.max(0, Number(row.writeOps10K) || 0);
+        const readOps10K = Math.max(0, Number(row.readOps10K) || 0);
+        if (writeOps10K > 0) {
+          const op = findBlobOperationsPricePer10K(currency, armRegionName, row.tier, row.redundancy, 'write');
+          if (op) {
+            const m = op.retailPrice * writeOps10K;
+            monthly += m;
+            lineItems.push({ category: 'Write operations', detail: `${writeOps10K} \u00d7 10K`, amount: m });
+          }
+        }
+        if (readOps10K > 0) {
+          const op = findBlobOperationsPricePer10K(currency, armRegionName, row.tier, row.redundancy, 'read');
+          if (op) {
+            const m = op.retailPrice * readOps10K;
+            monthly += m;
+            lineItems.push({ category: 'Read operations', detail: `${readOps10K} \u00d7 10K`, amount: m });
+          }
+        }
+        break;
+      }
+
+      case 'files': {
+        const cap = Math.max(0, Number(row.capacityGiB) || 0);
+        const fp = findAzureFilesPricePerGiBMonth(currency, armRegionName, row.tier, row.redundancy);
+        if (fp && cap > 0) {
+          const m = fp.retailPrice * cap;
+          monthly += m;
+          lineItems.push({
+            category: `${row.tier} ${row.redundancy} file share`,
+            detail: `${cap} GiB ${row.tier === 'Premium' ? 'provisioned' : 'stored'}`,
+            amount: m,
+          });
+        } else if (!fp) {
+          warnings.push(`No ${row.tier}/${row.redundancy} Azure Files price for ${armRegionName}/${currency}.`);
+        }
         break;
       }
 
@@ -187,21 +227,31 @@ export function estimateAzure(input) {
             warnings.push(`No VPN Gateway price for ${row.skuName} in ${armRegionName}/${currency}.`);
           }
         }
+        if (row.publicIp) {
+          const sku = row.publicIpSku || 'Standard';
+          const ip = findPublicIpPriceBySku(currency, armRegionName, sku);
+          if (ip) {
+            const m = ip.retailPrice * HOURS_PER_MONTH;
+            monthly += m;
+            lineItems.push({ category: 'Public IP (VPN)', detail: `${sku} Static IPv4`, amount: m });
+          }
+        }
         break;
       }
 
       case 'nat': {
-        const { hour, data } = findNatGatewayPrice(currency, armRegionName);
+        const sku = row.skuName || 'Standard';
+        const { hour, data } = findNatGatewayPrice(currency, sku);
         if (hour) {
           const m = hour.retailPrice * HOURS_PER_MONTH;
           monthly += m;
           lineItems.push({
             category: 'NAT Gateway',
-            detail: `Hourly fee \u00d7 ${HOURS_PER_MONTH}h`,
+            detail: `${sku} hourly fee \u00d7 ${HOURS_PER_MONTH}h`,
             amount: m,
           });
         } else {
-          warnings.push(`No NAT Gateway hourly price for ${armRegionName}/${currency}.`);
+          warnings.push(`No NAT Gateway hourly price (${sku}) for ${currency}.`);
         }
         const dataGiB = Math.max(0, Number(row.dataProcessedGiB) || 0);
         if (data && dataGiB > 0) {
@@ -212,6 +262,15 @@ export function estimateAzure(input) {
             detail: `${dataGiB} GiB`,
             amount: m,
           });
+        }
+        if (row.publicIp) {
+          const ipSku = row.publicIpSku || 'Standard';
+          const ip = findPublicIpPriceBySku(currency, armRegionName, ipSku);
+          if (ip) {
+            const m = ip.retailPrice * HOURS_PER_MONTH;
+            monthly += m;
+            lineItems.push({ category: 'Public IP (NAT)', detail: `${ipSku} Static IPv4`, amount: m });
+          }
         }
         break;
       }

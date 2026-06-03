@@ -50,8 +50,9 @@ function regionOr(regions) {
 //   backup:         Item[],   // Azure Backup
 //   blobStorage:    Item[],   // Hot/Cool/Archive blob tiers
 //   vpnGateway:     Item[],   // VPN Gateway hourly SKUs
-//   natGateway:     Item[],   // NAT Gateway hourly + processed data
+//   natGateway:     Item[],   // NAT Gateway hourly + processed data (region-less, armRegionName=Global)
 //   appServicePlan: Item[],   // App Service Plan hourly SKUs
+//   azureFiles:     Item[],   // Azure Files (Files v2 / Premium Files)
 //   updatedAt:      Date,
 // }
 
@@ -78,6 +79,7 @@ export function getStatus() {
       vpnGatewayCount: cache[cur]?.vpnGateway?.length || 0,
       natGatewayCount: cache[cur]?.natGateway?.length || 0,
       appServicePlanCount: cache[cur]?.appServicePlan?.length || 0,
+      azureFilesCount: cache[cur]?.azureFiles?.length || 0,
     })),
   };
 }
@@ -107,16 +109,18 @@ export async function warmCache({ verbose = true } = {}) {
       const vmRiFilter = `serviceName eq 'Virtual Machines' and priceType eq 'Reservation' and ${regionFilter}`;
       // 8. Azure Backup — protected instance fees + backup storage redundancies
       const backupFilter = `serviceName eq 'Backup' and ${regionFilter} and priceType eq 'Consumption'`;
-      // 9. Blob Storage — Hot/Cool/Archive tiers + LRS/GRS/ZRS redundancies (data stored)
-      const blobFilter = `serviceName eq 'Storage' and (productName eq 'General Block Blob v2' or productName eq 'Blob Storage' or productName eq 'Archive Blob Storage') and ${regionFilter} and priceType eq 'Consumption'`;
+      // 9. Blob Storage — Standard tiers (Hot/Cool/Cold/Archive) + Premium Block Blob
+      const blobFilter = `serviceName eq 'Storage' and (productName eq 'General Block Blob v2' or productName eq 'Blob Storage' or productName eq 'Archive Blob Storage' or productName eq 'Premium Block Blob') and ${regionFilter} and priceType eq 'Consumption'`;
       // 10. VPN Gateway — hourly SKUs (Basic, VpnGw1..5, with AZ variants)
       const vpnFilter = `serviceName eq 'VPN Gateway' and ${regionFilter} and priceType eq 'Consumption'`;
-      // 11. NAT Gateway — gateway hours + data processed
-      const natFilter = `serviceName eq 'NAT Gateway' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 11. NAT Gateway — pricing is published as armRegionName='Global'; do not constrain by region.
+      const natFilter = `serviceName eq 'NAT Gateway' and priceType eq 'Consumption'`;
       // 12. App Service Plan — Basic/Standard/PremiumV3/Isolated tiers
       const appSvcFilter = `serviceName eq 'Azure App Service' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 13. Azure Files — Files v2 (Standard/Hot/Cool) + Premium Files
+      const filesFilter = `serviceName eq 'Storage' and (productName eq 'Files v2' or productName eq 'Premium Files') and ${regionFilter} and priceType eq 'Consumption'`;
 
-      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
@@ -125,10 +129,11 @@ export async function warmCache({ verbose = true } = {}) {
         fetchAllPages(bandwidthFilter, currency, { pageLimit: 20 }),
         fetchAllPages(vmRiFilter, currency, { pageLimit: 200 }),
         fetchAllPages(backupFilter, currency, { pageLimit: 50 }),
-        fetchAllPages(blobFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(blobFilter, currency, { pageLimit: 80 }),
         fetchAllPages(vpnFilter, currency, { pageLimit: 20 }),
-        fetchAllPages(natFilter, currency, { pageLimit: 10 }),
+        fetchAllPages(natFilter, currency, { pageLimit: 5 }),
         fetchAllPages(appSvcFilter, currency, { pageLimit: 80 }),
+        fetchAllPages(filesFilter, currency, { pageLimit: 50 }),
       ]);
 
       cache[currency] = {
@@ -144,6 +149,7 @@ export async function warmCache({ verbose = true } = {}) {
         vpnGateway,
         natGateway,
         appServicePlan,
+        azureFiles,
         updatedAt: new Date(),
       };
 
@@ -315,6 +321,40 @@ export function findStandardPublicIpPricePerHour(currency, armRegionName) {
         currency,
       }
     : null;
+}
+
+/**
+ * List Public IP SKUs available in the region. The Retail API publishes a Static and a
+ * Dynamic meter for "Basic", but only Static for "Standard"/"Global". We always use the
+ * Static meter as the canonical SKU price.
+ */
+export function listPublicIpSkus(currency, armRegionName) {
+  const items = cache[currency]?.publicIp || [];
+  const regional = items.filter(
+    (i) => i.armRegionName === armRegionName && /static/i.test(i.meterName || '')
+  );
+  const seen = new Map();
+  for (const i of regional) {
+    const key = i.skuName;
+    if (!key) continue;
+    if (!seen.has(key) || seen.get(key).hourly > i.retailPrice) {
+      seen.set(key, {
+        skuName: key,
+        hourly: i.retailPrice,
+        monthly: i.retailPrice * HOURS_PER_MONTH,
+        meterName: i.meterName,
+      });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.hourly - b.hourly);
+}
+
+export function findPublicIpPriceBySku(currency, armRegionName, skuName) {
+  const items = cache[currency]?.publicIp || [];
+  const regional = items.filter(
+    (i) => i.armRegionName === armRegionName && i.skuName === skuName && /static/i.test(i.meterName || '')
+  );
+  return regional.sort((a, b) => a.retailPrice - b.retailPrice)[0] || null;
 }
 
 // Inter-region bandwidth (Zone 1 by default — covers our curated EU regions).
@@ -601,20 +641,31 @@ export function findBackupStoragePricePerGiBMonth(currency, armRegionName, redun
 }
 
 /**
- * Blob storage per GiB/Month for a given tier (Hot|Cool|Archive) + redundancy.
+ * Blob storage per GiB/Month for a given tier (Hot|Cool|Cold|Archive|Premium) + redundancy.
+ * For Premium, the redundancy options are LRS or ZRS only.
  * Uses the first pricing tranche (\u2264 50 TB / "data stored").
  */
-export function findBlobStoragePricePerGiBMonth(currency, armRegionName, tier /* 'Hot'|'Cool'|'Archive' */, redundancy /* 'LRS'|'GRS'|'ZRS' */) {
+export function findBlobStoragePricePerGiBMonth(currency, armRegionName, tier /* 'Hot'|'Cool'|'Cold'|'Archive'|'Premium' */, redundancy /* 'LRS'|'GRS'|'ZRS' */) {
   const items = cache[currency]?.blobStorage || [];
   const wantTier = (tier || 'Hot').toLowerCase();
   const wantRed = (redundancy || 'LRS').toLowerCase();
-  const regional = items.filter(
-    (i) =>
-      i.armRegionName === armRegionName &&
-      /data stored/i.test(i.meterName || '') &&
-      new RegExp(wantTier, 'i').test(i.meterName + ' ' + (i.skuName || '') + ' ' + (i.productName || '')) &&
-      new RegExp(`\\b${wantRed}\\b`, 'i').test(i.meterName + ' ' + (i.skuName || ''))
-  );
+  const isPremium = wantTier === 'premium';
+
+  const regional = items.filter((i) => {
+    if (i.armRegionName !== armRegionName) return false;
+    if (!/data stored/i.test(i.meterName || '')) return false;
+    const haystack = `${i.meterName} ${i.skuName || ''} ${i.productName || ''}`;
+    if (isPremium) {
+      // Premium meters live under productName "Premium Block Blob" and have
+      // skuName like "Premium LRS" / "Premium ZRS".
+      return /premium/i.test(i.productName || '') && new RegExp(`\\b${wantRed}\\b`, 'i').test(haystack);
+    }
+    return (
+      new RegExp(`\\b${wantTier}\\b`, 'i').test(haystack) &&
+      new RegExp(`\\b${wantRed}\\b`, 'i').test(haystack) &&
+      !/premium/i.test(i.productName || '')
+    );
+  });
   // Prefer the lowest tranche (smallest "tierMinimumUnits") if present
   regional.sort((a, b) => (a.tierMinimumUnits || 0) - (b.tierMinimumUnits || 0));
   const hit = regional[0];
@@ -632,54 +683,149 @@ export function findBlobStoragePricePerGiBMonth(currency, armRegionName, tier /*
     : null;
 }
 
+/**
+ * Blob storage per-operation price (per 10K transactions).
+ * `op` is 'write' | 'read' | 'list'. Returns null when the meter is not found.
+ */
+export function findBlobOperationsPricePer10K(currency, armRegionName, tier, redundancy, op) {
+  const items = cache[currency]?.blobStorage || [];
+  const wantTier = (tier || 'Hot').toLowerCase();
+  const wantRed = (redundancy || 'LRS').toLowerCase();
+  const isPremium = wantTier === 'premium';
+  const opRe =
+    op === 'write' ? /write\s*operations?/i :
+    op === 'read' ? /read\s*operations?/i :
+    op === 'list' ? /list\s*(and create container )?operations?/i :
+    /operations/i;
+
+  const regional = items.filter((i) => {
+    if (i.armRegionName !== armRegionName) return false;
+    if (!opRe.test(i.meterName || '')) return false;
+    const haystack = `${i.meterName} ${i.skuName || ''} ${i.productName || ''}`;
+    if (isPremium) {
+      return /premium/i.test(i.productName || '') && new RegExp(`\\b${wantRed}\\b`, 'i').test(haystack);
+    }
+    return (
+      new RegExp(`\\b${wantTier}\\b`, 'i').test(haystack) &&
+      new RegExp(`\\b${wantRed}\\b`, 'i').test(haystack) &&
+      !/premium/i.test(i.productName || '')
+    );
+  });
+  return regional[0] || null;
+}
+
+/**
+ * Azure Files standard tier price per GiB/Month for a given tier + redundancy.
+ * Tiers: 'Standard'|'Hot'|'Cool'. Premium uses provisioned capacity instead.
+ */
+export function findAzureFilesPricePerGiBMonth(currency, armRegionName, tier, redundancy) {
+  const items = cache[currency]?.azureFiles || [];
+  const wantTier = (tier || 'Hot').toLowerCase();
+  const wantRed = (redundancy || 'LRS').toLowerCase();
+  const isPremium = wantTier === 'premium';
+  const regional = items.filter((i) => {
+    if (i.armRegionName !== armRegionName) return false;
+    const haystack = `${i.meterName} ${i.skuName || ''} ${i.productName || ''}`;
+    if (isPremium) {
+      // Premium Files uses "Provisioned" meters (per GiB/month, no transactional read/write).
+      return /premium/i.test(i.productName || '') && /provisioned/i.test(i.meterName || '') && new RegExp(`\\b${wantRed}\\b`, 'i').test(haystack);
+    }
+    return (
+      /data stored/i.test(i.meterName || '') &&
+      new RegExp(`\\b${wantTier}\\b`, 'i').test(haystack) &&
+      new RegExp(`\\b${wantRed}\\b`, 'i').test(haystack) &&
+      !/premium/i.test(i.productName || '')
+    );
+  });
+  return regional[0] || null;
+}
+
 export { HOURS_PER_MONTH };
 
 // ---------- VPN Gateway / NAT Gateway / App Service Plan ----------
 
+// VPN Gateway prices in the Retail API are published with multiple meterName values
+// per skuName: the actual gateway hourly fee uses meterName === skuName (e.g. "VpnGw1")
+// or meterName === `${skuName} Gateway` (e.g. "Basic Gateway"); the rest are
+// per-tunnel "S2S Connection" / "P2S Connection" charges (~6\u20AC/mo) that must be
+// excluded from the gateway cost itself.
+function isVpnGatewayBaseMeter(item) {
+  const sku = item.skuName || '';
+  const meter = item.meterName || '';
+  if (!sku || !meter) return false;
+  // Exact match: "VpnGw1" === "VpnGw1"
+  if (meter === sku) return true;
+  // "Basic Gateway" for the Basic SKU, generic "<sku> Gateway" pattern.
+  if (meter === `${sku} Gateway`) return true;
+  return false;
+}
+
 /**
  * List the available VPN Gateway SKUs for the region (deduplicated by skuName).
- * Returns [{ skuName, hourly, productName, meterName }, ...] sorted alphabetically.
+ * Returns [{ skuName, hourly, monthly, productName, meterName }, ...] sorted by hourly.
  */
 export function listVpnGatewaySkus(currency, armRegionName) {
   const items = cache[currency]?.vpnGateway || [];
-  const byHour = items.filter(
-    (i) =>
-      i.armRegionName === armRegionName &&
-      /(hour|gateway)/i.test(i.unitOfMeasure || '') &&
-      !/data\s*transfer|egress|inter/i.test(i.meterName || '')
+  const baseMeters = items.filter(
+    (i) => i.armRegionName === armRegionName && isVpnGatewayBaseMeter(i)
   );
   const seen = new Map();
-  for (const i of byHour) {
-    const key = i.skuName || i.meterName;
-    if (!key) continue;
+  for (const i of baseMeters) {
+    const key = i.skuName;
     if (!seen.has(key)) {
-      seen.set(key, { skuName: key, hourly: i.retailPrice, productName: i.productName, meterName: i.meterName });
+      seen.set(key, {
+        skuName: key,
+        hourly: i.retailPrice,
+        monthly: i.retailPrice * HOURS_PER_MONTH,
+        productName: i.productName,
+        meterName: i.meterName,
+      });
     }
   }
-  return [...seen.values()].sort((a, b) => a.skuName.localeCompare(b.skuName));
+  return [...seen.values()].sort((a, b) => a.hourly - b.hourly);
 }
 
 export function findVpnGatewayPrice(currency, armRegionName, skuName) {
   const items = cache[currency]?.vpnGateway || [];
   return items.find(
-    (i) =>
-      i.armRegionName === armRegionName &&
-      i.skuName === skuName &&
-      /(hour|gateway)/i.test(i.unitOfMeasure || '') &&
-      !/data\s*transfer|egress|inter/i.test(i.meterName || '')
+    (i) => i.armRegionName === armRegionName && i.skuName === skuName && isVpnGatewayBaseMeter(i)
   ) || null;
 }
 
 /**
  * NAT Gateway hourly + processed-data prices.
+ * Note: Azure publishes NAT Gateway prices with armRegionName='Global', not per-region,
+ * so we ignore the user's region selection for the lookup.
  */
-export function findNatGatewayPrice(currency, armRegionName) {
+export function listNatGatewaySkus(currency) {
+  const items = cache[currency]?.natGateway || [];
+  const seen = new Map();
+  for (const i of items) {
+    const key = i.skuName;
+    if (!key) continue;
+    const isHour = /hour/i.test(i.unitOfMeasure || '') && /gateway/i.test(i.meterName || '');
+    if (!isHour) continue;
+    if (!seen.has(key)) {
+      seen.set(key, {
+        skuName: key,
+        hourly: i.retailPrice,
+        monthly: i.retailPrice * HOURS_PER_MONTH,
+      });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.hourly - b.hourly);
+}
+
+export function findNatGatewayPrice(currency, skuName = 'Standard') {
   const items = cache[currency]?.natGateway || [];
   const hour = items.find(
-    (i) => i.armRegionName === armRegionName && /gateway\s*hour|nat\s*gateway/i.test(i.meterName || '') && /hour/i.test(i.unitOfMeasure || '')
+    (i) =>
+      i.skuName === skuName &&
+      /gateway/i.test(i.meterName || '') &&
+      /hour/i.test(i.unitOfMeasure || '')
   );
   const data = items.find(
-    (i) => i.armRegionName === armRegionName && /data\s*processed/i.test(i.meterName || '')
+    (i) => i.skuName === skuName && /data\s*processed/i.test(i.meterName || '')
   );
   return { hour, data };
 }

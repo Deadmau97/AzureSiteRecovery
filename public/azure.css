@@ -719,3 +719,12 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   .modal-grid { grid-template-columns: 1fr; }
   .results-bar { flex-wrap: wrap; gap: 8px; }
 }
+
+/* Reorder mode + extra row controls */
+.rows-toolbar-actions { display: flex; gap: 8px; align-items: center; }
+.row-card .row-up, .row-card .row-down { display: none; color: var(--muted); }
+.row-card.reorder .row-up,
+.row-card.reorder .row-down { display: inline-flex; }
+.row-card.reorder { outline: 1px dashed var(--accent); outline-offset: -2px; }
+.row-card .row-copy { color: var(--muted); }
+.row-card .row-copy:hover, .row-card .row-up:hover, .row-card .row-down:hover { color: var(--accent); }

@@ -1,12 +1,9 @@
 // Azure Calculator frontend — row-based model with searchable service catalog,
-// global default settings, collapsible rows, dedicated results page (PDF + charts),
-// and support for VPN Gateway / NAT Gateway / App Service Plan in addition to
-// Virtual Machines, Public IPs, Storage Accounts and per-VM Backup.
+// global default settings, collapsible rows, live cost preview, copy + reorder
+// helpers, dedicated results page (PDF + charts) and support for VPN Gateway,
+// NAT Gateway, Public IPs, Storage Accounts, Azure Files and per-VM Backup.
 
 // ---------- Service catalog ----------
-// Each entry: { type, title, sub, icon, keywords[] }
-// The catalog feeds both the tile grid and the search box. `keywords` are the
-// extra terms the user might type that should still match the tile.
 const CATALOG = [
   {
     type: 'vm',
@@ -18,16 +15,23 @@ const CATALOG = [
   {
     type: 'storage',
     title: 'Storage Account',
-    sub: 'Blob — Hot/Cool/Archive, LRS/GRS/ZRS',
+    sub: 'Blob — Standard v2, Premium block blob',
     icon: '/icons/storage/10086-icon-service-Storage-Accounts.svg',
-    keywords: ['blob', 'storage', 'account', 'bucket', 'object'],
+    keywords: ['blob', 'storage', 'account', 'bucket', 'object', 'standard', 'premium'],
+  },
+  {
+    type: 'files',
+    title: 'Azure Files',
+    sub: 'SMB / NFS managed file shares',
+    icon: '/icons/storage/10400-icon-service-Azure-Fileshares.svg',
+    keywords: ['files', 'smb', 'nfs', 'share', 'file share'],
   },
   {
     type: 'ip',
     title: 'Public IP',
-    sub: 'Standard Static IPv4',
+    sub: 'Basic / Standard / Global Static IPv4',
     icon: '/icons/networking/10069-icon-service-Public-IP-Addresses.svg',
-    keywords: ['public', 'ip', 'network', 'ipv4', 'ipv6'],
+    keywords: ['public', 'ip', 'network', 'ipv4', 'static'],
   },
   {
     type: 'vpn',
@@ -43,16 +47,9 @@ const CATALOG = [
     icon: '/icons/networking/10310-icon-service-NAT.svg',
     keywords: ['nat', 'outbound', 'snat', 'egress', 'network'],
   },
-  {
-    type: 'appservice',
-    title: 'App Service Plan',
-    sub: 'Managed web/app hosting',
-    icon: '/icons/compute/10035-icon-service-App-Services.svg',
-    keywords: ['app service', 'web app', 'function', 'paas', 'hosting'],
-  },
 ];
 
-// ---------- Defaults (applied to every new row, overridable per-row) ----------
+// ---------- Defaults applied to every new row (overridable per row) ----------
 const FACTORY_DEFAULTS = {
   reservation: 'payg',
   uptimeHours: 730,
@@ -68,6 +65,7 @@ const FACTORY_DEFAULTS = {
   backupChurn: 5,
   blobTier: 'Hot',
   blobRedundancy: 'LRS',
+  ipSku: 'Standard',
 };
 
 const state = {
@@ -76,10 +74,12 @@ const state = {
   rows: [],
   diskTiers: { 'Standard SSD': [], 'Premium SSD': [] },
   vpnSkus: [],
-  appServiceSkus: [],
+  natSkus: [],
+  publicIpSkus: [],
   defaults: loadDefaults(),
   lastEstimate: null,
   collapsedAll: false,
+  reorderMode: false,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -107,19 +107,15 @@ async function init() {
   applyEmptyState();
 }
 
-// ---------- Disclaimer ----------
 function wireDisclaimer() {
   const modal = $('#disclaimerModal');
-  if (sessionStorage.getItem('azureCalc.disclaimer') === 'accepted') {
-    modal.hidden = true;
-  }
+  if (sessionStorage.getItem('azureCalc.disclaimer') === 'accepted') modal.hidden = true;
   $('#disclaimerAcceptBtn').addEventListener('click', () => {
     sessionStorage.setItem('azureCalc.disclaimer', 'accepted');
     modal.hidden = true;
   });
 }
 
-// ---------- Bootstrap data ----------
 async function loadRegions() {
   const r = await fetch('/api/regions').then((x) => x.json());
   const sel = $('#regionSelect');
@@ -135,6 +131,8 @@ async function loadRegions() {
   sel.addEventListener('change', async () => {
     state.region = sel.value;
     await loadServiceCatalogs();
+    renderRows();
+    schedulePreview();
   });
 }
 
@@ -153,7 +151,9 @@ async function loadCurrencies() {
   sel.addEventListener('change', async () => {
     state.currency = sel.value;
     await loadServiceCatalogs();
+    renderRows();
     pollStatus();
+    schedulePreview();
   });
 }
 
@@ -167,16 +167,16 @@ async function loadDiskTiers() {
 }
 
 async function loadServiceCatalogs() {
-  // SKU lists for region-bound services. Fetched on region/currency change so the
-  // dropdowns inside VPN / App Service rows always reflect the current selection.
   if (!state.region) return;
   try {
-    const [vpn, app] = await Promise.all([
+    const [vpn, nat, ip] = await Promise.all([
       fetch(`/api/azure/vpn-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
-      fetch(`/api/azure/appservice-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
+      fetch(`/api/azure/nat-skus?currency=${state.currency}`).then((x) => x.json()),
+      fetch(`/api/azure/publicip-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
     ]);
-    state.vpnSkus = vpn;
-    state.appServiceSkus = app;
+    state.vpnSkus = vpn || [];
+    state.natSkus = nat || [];
+    state.publicIpSkus = ip || [];
   } catch (e) {
     console.error('catalog fetch failed', e);
   }
@@ -200,7 +200,7 @@ async function pollStatus() {
       pill.className = 'status-pill error';
     } else {
       const cur = s.currencies.find((c) => c.currency === state.currency);
-      pill.textContent = cur ? `VMs ${cur.vmCount} · Disks ${cur.diskCount} · VPN ${cur.vpnGatewayCount} · AppSvc ${cur.appServicePlanCount}` : 'Ready';
+      pill.textContent = cur ? `VMs ${cur.vmCount} · Disks ${cur.diskCount} · VPN ${cur.vpnGatewayCount} · NAT ${cur.natGatewayCount}` : 'Ready';
       pill.className = 'status-pill ready';
     }
   } catch {
@@ -209,15 +209,13 @@ async function pollStatus() {
   }
 }
 
-// ---------- Service catalog rendering + search ----------
 function renderServices(filter = '') {
   const grid = $('#servicesGrid');
   grid.innerHTML = '';
   const q = (filter || '').trim().toLowerCase();
   const matches = CATALOG.filter((svc) => {
     if (!q) return true;
-    const hay = [svc.title, svc.sub, svc.type, ...(svc.keywords || [])].join(' ').toLowerCase();
-    return hay.includes(q);
+    return [svc.title, svc.sub, svc.type, ...(svc.keywords || [])].join(' ').toLowerCase().includes(q);
   });
   if (matches.length === 0) {
     const empty = document.createElement('div');
@@ -244,7 +242,6 @@ function renderServices(filter = '') {
   }
 }
 
-// ---------- Toolbar ----------
 function wireToolbar() {
   $('#refreshPricesBtn').addEventListener('click', async () => {
     await fetch('/api/refresh-prices', { method: 'POST' });
@@ -256,11 +253,14 @@ function wireToolbar() {
   $('#editDefaultsBtn').addEventListener('click', openDefaultsModal);
   $('#serviceSearch').addEventListener('input', (e) => renderServices(e.target.value));
   $('#toggleCollapseAllBtn').addEventListener('click', toggleCollapseAll);
+  $('#toggleReorderBtn').addEventListener('click', toggleReorderMode);
 }
 
 function applyEmptyState() {
-  $('#emptyState').hidden = state.rows.length > 0;
-  $('#toggleCollapseAllBtn').hidden = state.rows.length === 0;
+  const empty = state.rows.length === 0;
+  $('#emptyState').hidden = !empty;
+  $('#toggleCollapseAllBtn').hidden = empty;
+  $('#toggleReorderBtn').hidden = empty;
 }
 
 function toggleCollapseAll() {
@@ -269,7 +269,14 @@ function toggleCollapseAll() {
   $('#toggleCollapseAllBtn').textContent = state.collapsedAll ? 'Expand all' : 'Collapse all';
 }
 
-// ---------- Defaults (persisted in localStorage) ----------
+function toggleReorderMode() {
+  state.reorderMode = !state.reorderMode;
+  $('#toggleReorderBtn').textContent = state.reorderMode ? 'Done reordering' : 'Reorder';
+  $('#toggleReorderBtn').classList.toggle('primary', state.reorderMode);
+  $$('.row-card').forEach((card) => card.classList.toggle('reorder', state.reorderMode));
+}
+
+// ---------- Defaults ----------
 function loadDefaults() {
   try {
     const raw = localStorage.getItem('azureCalc.defaults');
@@ -288,24 +295,20 @@ function wireDefaultsModal() {
   const modal = $('#defaultsModal');
   $('#defaultsModalClose').addEventListener('click', () => (modal.hidden = true));
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.hidden = true; });
-
   $('#defaultsResetBtn').addEventListener('click', () => {
     state.defaults = { ...FACTORY_DEFAULTS };
     saveDefaults();
     fillDefaultsModal();
   });
-
   $('#defaultsSaveBtn').addEventListener('click', () => {
     state.defaults = readDefaultsModal();
     saveDefaults();
     modal.hidden = true;
+    schedulePreview();
   });
 }
 
-function openDefaultsModal() {
-  fillDefaultsModal();
-  $('#defaultsModal').hidden = false;
-}
+function openDefaultsModal() { fillDefaultsModal(); $('#defaultsModal').hidden = false; }
 
 function fillDefaultsModal() {
   const d = state.defaults;
@@ -341,6 +344,7 @@ function readDefaultsModal() {
     backupChurn: +$('#defBackupChurn').value || 5,
     blobTier: $('#defBlobTier').value,
     blobRedundancy: $('#defBlobRedundancy').value,
+    ipSku: state.defaults.ipSku || 'Standard',
   };
 }
 
@@ -354,6 +358,7 @@ function addRow(type, prefill = {}, insertAfterId = null) {
     state.rows.push(row);
   }
   renderRows();
+  schedulePreview();
   return row;
 }
 
@@ -363,16 +368,15 @@ function makeRow(type, prefill = {}) {
   switch (type) {
     case 'vm':
       return {
-        id,
-        type: 'vm',
+        id, type: 'vm',
         name: prefill.name || `VM-${countRows('vm') + 1}`,
         vcpu: prefill.vcpu || 2,
         ramGiB: prefill.ramGiB || 8,
         os: prefill.os || d.os,
-        recommendedVm: null,
-        reservation: d.reservation,
-        hoursPerMonth: d.uptimeHours,
-        hybridBenefit: d.hybridBenefit,
+        recommendedVm: prefill.recommendedVm || null,
+        reservation: prefill.reservation || d.reservation,
+        hoursPerMonth: prefill.hoursPerMonth || d.uptimeHours,
+        hybridBenefit: prefill.hybridBenefit ?? d.hybridBenefit,
         disks: (prefill.disks && prefill.disks.length
           ? prefill.disks
           : [{ label: 'OS disk', family: d.osDiskFamily, sizeGiB: d.osDiskSize }]
@@ -386,69 +390,96 @@ function makeRow(type, prefill = {}) {
       };
     case 'ip':
       return {
-        id,
-        type: 'ip',
+        id, type: 'ip',
         name: prefill.name || `PublicIP-${countRows('ip') + 1}`,
         count: prefill.count || 1,
+        skuName: prefill.skuName || d.ipSku || 'Standard',
       };
     case 'backup':
       return {
-        id,
-        type: 'backup',
+        id, type: 'backup',
         name: prefill.name || 'Backup',
         parentVmId: prefill.parentVmId || null,
         sourceSizeGiB: prefill.sourceSizeGiB || 128,
-        policy: d.backupPolicy,
-        retentionDays: d.backupRetention,
-        redundancy: d.backupRedundancy,
-        dailyChurnPct: d.backupChurn,
+        policy: prefill.policy || d.backupPolicy,
+        retentionDays: prefill.retentionDays || d.backupRetention,
+        redundancy: prefill.redundancy || d.backupRedundancy,
+        dailyChurnPct: prefill.dailyChurnPct ?? d.backupChurn,
       };
     case 'storage':
       return {
-        id,
-        type: 'storage',
+        id, type: 'storage',
         name: prefill.name || `storage-${countRows('storage') + 1}`,
-        tier: d.blobTier,
-        redundancy: d.blobRedundancy,
+        tier: prefill.tier || d.blobTier,
+        redundancy: prefill.redundancy || d.blobRedundancy,
+        capacityGiB: prefill.capacityGiB || 100,
+        writeOps10K: prefill.writeOps10K || 0,
+        readOps10K: prefill.readOps10K || 0,
+      };
+    case 'files':
+      return {
+        id, type: 'files',
+        name: prefill.name || `files-${countRows('files') + 1}`,
+        tier: prefill.tier || 'Hot',
+        redundancy: prefill.redundancy || 'LRS',
         capacityGiB: prefill.capacityGiB || 100,
       };
     case 'vpn':
       return {
-        id,
-        type: 'vpn',
+        id, type: 'vpn',
         name: prefill.name || `vpn-gw-${countRows('vpn') + 1}`,
-        skuName: state.vpnSkus[0]?.skuName || null,
+        skuName: prefill.skuName || state.vpnSkus[0]?.skuName || null,
+        publicIp: prefill.publicIp ?? false,
+        publicIpSku: prefill.publicIpSku || 'Standard',
       };
     case 'nat':
       return {
-        id,
-        type: 'nat',
+        id, type: 'nat',
         name: prefill.name || `nat-gw-${countRows('nat') + 1}`,
-        dataProcessedGiB: 100,
+        skuName: prefill.skuName || state.natSkus[0]?.skuName || 'Standard',
+        dataProcessedGiB: prefill.dataProcessedGiB ?? 100,
+        publicIp: prefill.publicIp ?? false,
+        publicIpSku: prefill.publicIpSku || 'Standard',
       };
-    case 'appservice': {
-      const first = state.appServiceSkus[0];
-      return {
-        id,
-        type: 'appservice',
-        name: prefill.name || `app-plan-${countRows('appservice') + 1}`,
-        productName: first?.productName || null,
-        skuName: first?.skuName || null,
-        instances: 1,
-      };
-    }
     default:
       throw new Error(`Unknown row type: ${type}`);
   }
 }
 
-function countRows(type) {
-  return state.rows.filter((r) => r.type === type).length;
-}
+function countRows(type) { return state.rows.filter((r) => r.type === type).length; }
 
 function removeRow(id) {
   state.rows = state.rows.filter((r) => r.id !== id && r.parentVmId !== id);
   renderRows();
+  schedulePreview();
+}
+
+function copyRow(id) {
+  const idx = state.rows.findIndex((r) => r.id === id);
+  if (idx < 0) return;
+  const src = state.rows[idx];
+  // Deep clone via JSON to drop ids, then reseed — works for all primitive payloads.
+  const clone = JSON.parse(JSON.stringify(src));
+  delete clone.id;
+  clone.name = `${src.name} - Copy`;
+  clone.parentVmId = null;
+  // Add at the end of the list (per spec).
+  const row = makeRow(clone.type, clone);
+  state.rows.push(row);
+  renderRows();
+  schedulePreview();
+}
+
+function moveRow(id, direction) {
+  const idx = state.rows.findIndex((r) => r.id === id);
+  if (idx < 0) return;
+  const target = idx + direction;
+  if (target < 0 || target >= state.rows.length) return;
+  const tmp = state.rows[idx];
+  state.rows[idx] = state.rows[target];
+  state.rows[target] = tmp;
+  renderRows();
+  schedulePreview();
 }
 
 // ---------- Render ----------
@@ -460,41 +491,63 @@ function renderRows() {
   updateRowCosts();
 }
 
-function updateRowCosts() {
-  // Reflect monthly cost from last estimate into the row header (visible even when collapsed).
-  if (!state.lastEstimate) return;
-  const byId = new Map();
-  for (const item of state.lastEstimate.items) byId.set(item.id, item.monthly);
-  $$('.row-card').forEach((card) => {
-    const cost = byId.get(card.dataset.rowId);
-    const span = card.querySelector('.row-cost');
-    if (span && typeof cost === 'number') {
-      span.textContent = fmt(cost);
-      span.classList.remove('muted');
-    }
-  });
-}
-
 function renderRow(row) {
   switch (row.type) {
     case 'vm': return renderVmRow(row);
     case 'ip': return renderIpRow(row);
     case 'backup': return renderBackupRow(row);
     case 'storage': return renderStorageRow(row);
+    case 'files': return renderFilesRow(row);
     case 'vpn': return renderVpnRow(row);
     case 'nat': return renderNatRow(row);
-    case 'appservice': return renderAppServiceRow(row);
     default: return document.createElement('div');
   }
 }
 
+// Inject the per-row toolbar buttons (copy, up, down) right before .row-remove and
+// wire common behaviors (name, collapse, remove). Returns nothing — call from each
+// renderXxxRow() so every card has a uniform header.
 function commonWire(card, row) {
   card.dataset.rowId = row.id;
   if (state.collapsedAll) card.classList.add('collapsed');
+  if (state.reorderMode) card.classList.add('reorder');
+
+  const removeBtn = card.querySelector('.row-remove');
+  // Inject up/down/copy controls in front of the remove button.
+  const upBtn = document.createElement('button');
+  upBtn.type = 'button';
+  upBtn.className = 'icon-btn row-up';
+  upBtn.title = 'Move up';
+  upBtn.setAttribute('aria-label', 'Move up');
+  upBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>';
+
+  const downBtn = document.createElement('button');
+  downBtn.type = 'button';
+  downBtn.className = 'icon-btn row-down';
+  downBtn.title = 'Move down';
+  downBtn.setAttribute('aria-label', 'Move down');
+  downBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'icon-btn row-copy';
+  copyBtn.title = 'Duplicate this item';
+  copyBtn.setAttribute('aria-label', 'Duplicate');
+  copyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+
+  removeBtn.parentNode.insertBefore(upBtn, removeBtn);
+  removeBtn.parentNode.insertBefore(downBtn, removeBtn);
+  removeBtn.parentNode.insertBefore(copyBtn, removeBtn);
+
+  upBtn.addEventListener('click', (e) => { e.stopPropagation(); moveRow(row.id, -1); });
+  downBtn.addEventListener('click', (e) => { e.stopPropagation(); moveRow(row.id, +1); });
+  copyBtn.addEventListener('click', (e) => { e.stopPropagation(); copyRow(row.id); });
+
   const nameInput = card.querySelector('.row-name');
   nameInput.value = row.name;
   nameInput.addEventListener('input', () => { row.name = nameInput.value; });
-  card.querySelector('.row-remove').addEventListener('click', () => removeRow(row.id));
+
+  removeBtn.addEventListener('click', () => removeRow(row.id));
   const collapseBtn = card.querySelector('.row-collapse');
   if (collapseBtn) collapseBtn.addEventListener('click', () => card.classList.toggle('collapsed'));
   return { nameInput };
@@ -534,26 +587,30 @@ function renderVmRow(row) {
   resSel.addEventListener('change', () => {
     row.reservation = resSel.value;
     uptimeWrap.hidden = row.reservation !== 'payg';
+    schedulePreview();
   });
   uptime.addEventListener('change', () => {
     let v = +uptime.value || 0;
     if (v < 0) v = 0; if (v > 730) v = 730;
     uptime.value = v;
     row.hoursPerMonth = v;
+    schedulePreview();
   });
-  ahb.addEventListener('change', () => { row.hybridBenefit = ahb.checked; });
+  ahb.addEventListener('change', () => { row.hybridBenefit = ahb.checked; schedulePreview(); });
   osBtns.forEach((b) => b.addEventListener('click', () => {
     row.os = b.dataset.os;
     osBtns.forEach((o) => o.setAttribute('aria-pressed', o === b));
     ahbWrap.classList.toggle('disabled', row.os !== 'windows');
+    schedulePreview();
   }));
-  skuSel.addEventListener('change', () => { row.recommendedVm = skuSel.value || null; });
+  skuSel.addEventListener('change', () => { row.recommendedVm = skuSel.value || null; schedulePreview(); });
   addBackupBtn.addEventListener('click', () => onAddBackup(row));
   addDiskBtn.addEventListener('click', () => {
     const d = state.defaults;
     const disk = { id: uid(), label: `Data disk ${row.disks.length}`, family: d.dataDiskFamily, sizeGiB: d.dataDiskSize, sku: null };
     row.disks.push(disk);
     disksList.appendChild(renderVmDisk(row, disk, row.disks.length - 1));
+    schedulePreview();
   });
 
   refreshRecommendations(row, skuSel);
@@ -581,7 +638,6 @@ function renderVmDisk(vm, disk, idx) {
     removeBtn.hidden = true;
     node.classList.add('os-disk');
   }
-
   recomputeSku();
 
   function recomputeSku() {
@@ -591,12 +647,13 @@ function renderVmDisk(vm, disk, idx) {
   }
 
   label.addEventListener('input', () => { if (!isOs) disk.label = label.value; });
-  family.addEventListener('change', () => { disk.family = family.value; recomputeSku(); });
-  size.addEventListener('change', () => { disk.sizeGiB = +size.value || 0; recomputeSku(); });
+  family.addEventListener('change', () => { disk.family = family.value; recomputeSku(); schedulePreview(); });
+  size.addEventListener('change', () => { disk.sizeGiB = +size.value || 0; recomputeSku(); schedulePreview(); });
   removeBtn.addEventListener('click', () => {
     if (isOs) return;
     vm.disks = vm.disks.filter((d) => d.id !== disk.id);
     node.remove();
+    schedulePreview();
   });
   return node;
 }
@@ -604,15 +661,16 @@ function renderVmDisk(vm, disk, idx) {
 async function refreshRecommendations(row, skuSel) {
   try {
     const r = await fetch('/api/recommend', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ vcpu: row.vcpu, ramGiB: row.ramGiB }),
     }).then((x) => x.json());
     skuSel.innerHTML = '';
     if (!Array.isArray(r) || r.length === 0) {
       const opt = document.createElement('option'); opt.value = ''; opt.textContent = 'No match';
       skuSel.appendChild(opt);
-      row.recommendedVm = null; return;
+      row.recommendedVm = null;
+      schedulePreview();
+      return;
     }
     for (const rec of r) {
       const opt = document.createElement('option');
@@ -620,19 +678,41 @@ async function refreshRecommendations(row, skuSel) {
       opt.textContent = `${rec.armSkuName} — ${rec.vcpu}v / ${rec.ramGiB}GiB`;
       skuSel.appendChild(opt);
     }
-    skuSel.value = r[0].armSkuName;
-    row.recommendedVm = r[0].armSkuName;
+    // Preserve previously chosen SKU if still in the list.
+    if (row.recommendedVm && r.some((x) => x.armSkuName === row.recommendedVm)) {
+      skuSel.value = row.recommendedVm;
+    } else {
+      skuSel.value = r[0].armSkuName;
+      row.recommendedVm = r[0].armSkuName;
+    }
+    schedulePreview();
   } catch (e) { console.error('recommend error', e); }
 }
 
-// ---------- Other row renderers ----------
+// ---------- IP / Backup / Storage / Files ----------
 function renderIpRow(row) {
   const card = $('#ipRowTpl').content.firstElementChild.cloneNode(true);
   commonWire(card, row);
   const count = card.querySelector('.ip-count');
+  const sku = card.querySelector('.ip-sku');
   count.value = row.count;
-  count.addEventListener('change', () => { row.count = +count.value || 1; });
+  populateIpSkuSelect(sku, row.skuName);
+  count.addEventListener('change', () => { row.count = +count.value || 1; schedulePreview(); });
+  sku.addEventListener('change', () => { row.skuName = sku.value; schedulePreview(); });
   return card;
+}
+
+function populateIpSkuSelect(sel, current) {
+  sel.innerHTML = '';
+  const skus = state.publicIpSkus.length ? state.publicIpSkus : [{ skuName: 'Standard' }, { skuName: 'Basic' }, { skuName: 'Global' }];
+  for (const s of skus) {
+    const opt = document.createElement('option');
+    opt.value = s.skuName;
+    const monthly = s.monthly != null ? ` — ${fmt(s.monthly)} /mo` : '';
+    opt.textContent = `${s.skuName}${monthly}`;
+    sel.appendChild(opt);
+  }
+  sel.value = current || 'Standard';
 }
 
 function renderBackupRow(row) {
@@ -645,11 +725,11 @@ function renderBackupRow(row) {
   const churn = card.querySelector('.bk-churn');
   size.value = row.sourceSizeGiB; policy.value = row.policy;
   ret.value = row.retentionDays; red.value = row.redundancy; churn.value = row.dailyChurnPct;
-  size.addEventListener('change', () => { row.sourceSizeGiB = +size.value || 1; });
-  policy.addEventListener('change', () => { row.policy = policy.value; });
-  ret.addEventListener('change', () => { row.retentionDays = +ret.value || 30; });
-  red.addEventListener('change', () => { row.redundancy = red.value; });
-  churn.addEventListener('change', () => { row.dailyChurnPct = +churn.value || 0; });
+  size.addEventListener('change', () => { row.sourceSizeGiB = +size.value || 1; schedulePreview(); });
+  policy.addEventListener('change', () => { row.policy = policy.value; schedulePreview(); });
+  ret.addEventListener('change', () => { row.retentionDays = +ret.value || 30; schedulePreview(); });
+  red.addEventListener('change', () => { row.redundancy = red.value; schedulePreview(); });
+  churn.addEventListener('change', () => { row.dailyChurnPct = +churn.value || 0; schedulePreview(); });
   return card;
 }
 
@@ -659,86 +739,156 @@ function renderStorageRow(row) {
   const tier = card.querySelector('.sa-tier');
   const red = card.querySelector('.sa-redundancy');
   const cap = card.querySelector('.sa-capacity');
+  const writeOps = card.querySelector('.sa-write-ops');
+  const readOps = card.querySelector('.sa-read-ops');
+
   tier.value = row.tier; red.value = row.redundancy; cap.value = row.capacityGiB;
-  tier.addEventListener('change', () => { row.tier = tier.value; });
-  red.addEventListener('change', () => { row.redundancy = red.value; });
-  cap.addEventListener('change', () => { row.capacityGiB = +cap.value || 0; });
+  writeOps.value = row.writeOps10K; readOps.value = row.readOps10K;
+  syncStorageRedundancy(tier.value, red);
+
+  tier.addEventListener('change', () => {
+    row.tier = tier.value;
+    syncStorageRedundancy(row.tier, red);
+    row.redundancy = red.value;
+    schedulePreview();
+  });
+  red.addEventListener('change', () => { row.redundancy = red.value; schedulePreview(); });
+  cap.addEventListener('change', () => { row.capacityGiB = +cap.value || 0; schedulePreview(); });
+  writeOps.addEventListener('change', () => { row.writeOps10K = +writeOps.value || 0; schedulePreview(); });
+  readOps.addEventListener('change', () => { row.readOps10K = +readOps.value || 0; schedulePreview(); });
   return card;
 }
 
+// Premium block blob only supports LRS / ZRS — rebuild redundancy options to match.
+function syncStorageRedundancy(tier, redSel) {
+  const isPremium = tier === 'Premium';
+  const opts = isPremium ? [['LRS', 'LRS'], ['ZRS', 'ZRS']] : [['LRS', 'LRS'], ['GRS', 'GRS'], ['ZRS', 'ZRS']];
+  const current = redSel.value;
+  redSel.innerHTML = '';
+  for (const [val, label] of opts) {
+    const o = document.createElement('option'); o.value = val; o.textContent = label; redSel.appendChild(o);
+  }
+  redSel.value = opts.some(([v]) => v === current) ? current : opts[0][0];
+}
+
+function renderFilesRow(row) {
+  const card = $('#filesRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  const tier = card.querySelector('.af-tier');
+  const red = card.querySelector('.af-redundancy');
+  const cap = card.querySelector('.af-capacity');
+  tier.value = row.tier; red.value = row.redundancy; cap.value = row.capacityGiB;
+  syncFilesRedundancy(tier.value, red);
+  tier.addEventListener('change', () => {
+    row.tier = tier.value;
+    syncFilesRedundancy(row.tier, red);
+    row.redundancy = red.value;
+    schedulePreview();
+  });
+  red.addEventListener('change', () => { row.redundancy = red.value; schedulePreview(); });
+  cap.addEventListener('change', () => { row.capacityGiB = +cap.value || 0; schedulePreview(); });
+  return card;
+}
+
+function syncFilesRedundancy(tier, redSel) {
+  const isPremium = tier === 'Premium';
+  const opts = isPremium
+    ? [['LRS', 'LRS'], ['ZRS', 'ZRS']]
+    : [['LRS', 'LRS'], ['GRS', 'GRS'], ['ZRS', 'ZRS'], ['GZRS', 'GZRS']];
+  const current = redSel.value;
+  redSel.innerHTML = '';
+  for (const [val, label] of opts) {
+    const o = document.createElement('option'); o.value = val; o.textContent = label; redSel.appendChild(o);
+  }
+  redSel.value = opts.some(([v]) => v === current) ? current : opts[0][0];
+}
+
+// ---------- VPN / NAT ----------
 function renderVpnRow(row) {
   const card = $('#vpnRowTpl').content.firstElementChild.cloneNode(true);
   commonWire(card, row);
   const sel = card.querySelector('.vpn-sku');
+  populateVpnSkuSelect(sel, row.skuName);
+  if (row.skuName == null && sel.value) row.skuName = sel.value;
+  sel.addEventListener('change', () => { row.skuName = sel.value || null; schedulePreview(); });
+
+  const pip = card.querySelector('.vpn-pip');
+  const pipWrap = card.querySelector('.vpn-pip-sku-wrap');
+  const pipSku = card.querySelector('.vpn-pip-sku');
+  pip.checked = !!row.publicIp;
+  pipWrap.hidden = !pip.checked;
+  populateIpSkuSelect(pipSku, row.publicIpSku || 'Standard');
+  pip.addEventListener('change', () => {
+    row.publicIp = pip.checked;
+    pipWrap.hidden = !pip.checked;
+    schedulePreview();
+  });
+  pipSku.addEventListener('change', () => { row.publicIpSku = pipSku.value; schedulePreview(); });
+  return card;
+}
+
+function populateVpnSkuSelect(sel, current) {
   sel.innerHTML = '';
   if (state.vpnSkus.length === 0) {
     const opt = document.createElement('option'); opt.value = ''; opt.textContent = '(no SKUs found in region)';
     sel.appendChild(opt);
-  } else {
-    for (const s of state.vpnSkus) {
-      const opt = document.createElement('option');
-      opt.value = s.skuName;
-      opt.textContent = `${s.skuName} — ${fmt(s.hourly * 730)} /mo`;
-      sel.appendChild(opt);
-    }
+    return;
   }
-  if (row.skuName) sel.value = row.skuName; else row.skuName = sel.value || null;
-  sel.addEventListener('change', () => { row.skuName = sel.value || null; });
-  return card;
+  for (const s of state.vpnSkus) {
+    const opt = document.createElement('option');
+    opt.value = s.skuName;
+    opt.textContent = `${s.skuName} — ${fmt(s.monthly ?? s.hourly * 730)} /mo`;
+    sel.appendChild(opt);
+  }
+  sel.value = current && state.vpnSkus.some((s) => s.skuName === current) ? current : state.vpnSkus[0].skuName;
 }
 
 function renderNatRow(row) {
   const card = $('#natRowTpl').content.firstElementChild.cloneNode(true);
   commonWire(card, row);
+  const sel = card.querySelector('.nat-sku');
   const data = card.querySelector('.nat-data');
+  populateNatSkuSelect(sel, row.skuName);
+  if (!row.skuName && sel.value) row.skuName = sel.value;
   data.value = row.dataProcessedGiB;
-  data.addEventListener('change', () => { row.dataProcessedGiB = +data.value || 0; });
+  sel.addEventListener('change', () => { row.skuName = sel.value || null; schedulePreview(); });
+  data.addEventListener('change', () => { row.dataProcessedGiB = +data.value || 0; schedulePreview(); });
+
+  const pip = card.querySelector('.nat-pip');
+  const pipWrap = card.querySelector('.nat-pip-sku-wrap');
+  const pipSku = card.querySelector('.nat-pip-sku');
+  pip.checked = !!row.publicIp;
+  pipWrap.hidden = !pip.checked;
+  populateIpSkuSelect(pipSku, row.publicIpSku || 'Standard');
+  pip.addEventListener('change', () => {
+    row.publicIp = pip.checked;
+    pipWrap.hidden = !pip.checked;
+    schedulePreview();
+  });
+  pipSku.addEventListener('change', () => { row.publicIpSku = pipSku.value; schedulePreview(); });
   return card;
 }
 
-function renderAppServiceRow(row) {
-  const card = $('#appserviceRowTpl').content.firstElementChild.cloneNode(true);
-  commonWire(card, row);
-  const sel = card.querySelector('.app-sku');
-  const inst = card.querySelector('.app-instances');
+function populateNatSkuSelect(sel, current) {
   sel.innerHTML = '';
-  if (state.appServiceSkus.length === 0) {
-    const opt = document.createElement('option'); opt.value = ''; opt.textContent = '(no SKUs found in region)';
-    sel.appendChild(opt);
-  } else {
-    for (const s of state.appServiceSkus) {
-      const opt = document.createElement('option');
-      opt.value = JSON.stringify({ productName: s.productName, skuName: s.skuName });
-      opt.textContent = `${s.key} — ${fmt(s.hourly * 730)} /mo`;
-      sel.appendChild(opt);
-    }
-    if (row.productName && row.skuName) {
-      sel.value = JSON.stringify({ productName: row.productName, skuName: row.skuName });
-    } else {
-      const parsed = JSON.parse(sel.value);
-      row.productName = parsed.productName; row.skuName = parsed.skuName;
-    }
+  if (state.natSkus.length === 0) {
+    const opt = document.createElement('option'); opt.value = 'Standard'; opt.textContent = 'Standard'; sel.appendChild(opt);
+    return;
   }
-  inst.value = row.instances;
-  sel.addEventListener('change', () => {
-    if (!sel.value) return;
-    const parsed = JSON.parse(sel.value);
-    row.productName = parsed.productName; row.skuName = parsed.skuName;
-  });
-  inst.addEventListener('change', () => { row.instances = +inst.value || 1; });
-  return card;
+  for (const s of state.natSkus) {
+    const opt = document.createElement('option');
+    opt.value = s.skuName;
+    opt.textContent = `${s.skuName} — ${fmt(s.monthly ?? s.hourly * 730)} /mo`;
+    sel.appendChild(opt);
+  }
+  sel.value = current && state.natSkus.some((s) => s.skuName === current) ? current : state.natSkus[0].skuName;
 }
 
 // ---------- Add Backup from a VM ----------
 function onAddBackup(vm) {
   state.rows = state.rows.filter((r) => !(r.type === 'backup' && r.parentVmId === vm.id));
   const sourceSize = computeVmSourceSize(vm.id);
-  const prefill = {
-    name: `Backup - ${vm.name}`,
-    parentVmId: vm.id,
-    sourceSizeGiB: sourceSize,
-  };
-  addRow('backup', prefill, vm.id);
+  addRow('backup', { name: `Backup - ${vm.name}`, parentVmId: vm.id, sourceSizeGiB: sourceSize }, vm.id);
 }
 
 function computeVmSourceSize(vmId) {
@@ -775,7 +925,51 @@ async function onUploadRvtools(e) {
   e.target.value = '';
 }
 
-// ---------- Estimate + Results page ----------
+// ---------- Live preview (debounced) ----------
+let previewTimer = null;
+let previewSeq = 0;
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(runPreview, 250);
+}
+
+async function runPreview() {
+  if (state.rows.length === 0) {
+    state.lastEstimate = null;
+    $$('.row-card .row-cost').forEach((s) => { s.textContent = '—'; s.classList.add('muted'); });
+    return;
+  }
+  const seq = ++previewSeq;
+  try {
+    const r = await fetch('/api/azure/estimate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: state.region, currency: state.currency, rows: state.rows }),
+    }).then((x) => x.json());
+    if (seq !== previewSeq) return; // stale
+    if (!r || r.error) return;
+    state.lastEstimate = r;
+    updateRowCosts();
+  } catch (e) {
+    console.error('preview error', e);
+  }
+}
+
+function updateRowCosts() {
+  if (!state.lastEstimate) return;
+  const byId = new Map();
+  for (const item of state.lastEstimate.items) byId.set(item.id, item.monthly);
+  $$('.row-card').forEach((card) => {
+    const cost = byId.get(card.dataset.rowId);
+    const span = card.querySelector('.row-cost');
+    if (span && typeof cost === 'number') {
+      span.textContent = fmt(cost);
+      span.classList.remove('muted');
+    }
+  });
+}
+
+// ---------- Estimate page ----------
 function wireResultsView() {
   $('#backToBuilderBtn').addEventListener('click', () => {
     $('#resultsView').hidden = true;
@@ -790,19 +984,21 @@ async function runEstimate() {
     alert('Add at least one service before calculating.');
     return;
   }
-  const payload = { region: state.region, currency: state.currency, rows: state.rows };
   const meta = $('#estimateMeta'); meta.textContent = 'Computing…';
   try {
     const r = await fetch('/api/azure/estimate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ region: state.region, currency: state.currency, rows: state.rows }),
     }).then((x) => x.json());
     if (r.error) throw new Error(r.error);
     state.lastEstimate = r;
     showResultsView(r);
     updateRowCosts();
     meta.textContent = `Computed at ${new Date().toLocaleTimeString()}`;
-  } catch (e) { meta.textContent = ''; alert('Estimate failed: ' + e.message); }
+  } catch (e) {
+    meta.textContent = '';
+    alert('Estimate failed: ' + e.message);
+  }
 }
 
 function showResultsView(r) {
@@ -841,20 +1037,15 @@ function showResultsView(r) {
   renderCharts(r);
 }
 
-// ---------- Charts ----------
 let chartByType = null;
 let chartByItem = null;
 
 function renderCharts(r) {
   if (typeof Chart === 'undefined') return;
-
-  // Group by service type.
   const byType = {};
   for (const item of r.items) byType[item.type] = (byType[item.type] || 0) + item.monthly;
   const typeLabels = Object.keys(byType);
   const typeData = typeLabels.map((k) => +byType[k].toFixed(2));
-
-  // Top 10 individual items.
   const sortedItems = [...r.items].filter((i) => i.monthly > 0).sort((a, b) => b.monthly - a.monthly).slice(0, 10);
 
   if (chartByType) chartByType.destroy();
@@ -905,23 +1096,14 @@ function renderCharts(r) {
   });
 }
 
-// ---------- PDF export ----------
 function downloadEstimatePdf() {
-  if (typeof pdfMake === 'undefined') {
-    alert('PDF library not loaded. Check your internet connection.');
-    return;
-  }
+  if (typeof pdfMake === 'undefined') { alert('PDF library not loaded.'); return; }
   const data = state.lastEstimate;
   if (!data) return;
-
   const filename = `azure-estimate-${data.region}-${new Date().toISOString().slice(0, 10)}.pdf`;
 
   const itemsRows = [
-    [
-      { text: 'Item', style: 'th' },
-      { text: 'Type', style: 'th' },
-      { text: 'Monthly', style: 'th', alignment: 'right' },
-    ],
+    [{ text: 'Item', style: 'th' }, { text: 'Type', style: 'th' }, { text: 'Monthly', style: 'th', alignment: 'right' }],
     ...data.items.map((i) => [
       { text: i.name, style: 'td' },
       { text: i.type, style: 'td' },
@@ -973,27 +1155,16 @@ function downloadEstimatePdf() {
             [{ text: 'Grand total', style: 'metaKey' }, { text: fmt(data.grandMonthly), style: 'metaVal' }],
           ],
         },
-        layout: 'noBorders',
-        margin: [0, 0, 0, 14],
+        layout: 'noBorders', margin: [0, 0, 0, 14],
       },
       { text: 'Summary', style: 'h2' },
-      {
-        table: { headerRows: 1, widths: ['*', 80, 80], body: itemsRows },
-        layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' },
-      },
+      { table: { headerRows: 1, widths: ['*', 80, 80], body: itemsRows }, layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' } },
       { text: 'Per-item breakdown', style: 'h2', margin: [0, 16, 0, 6] },
       ...lineItemSections,
       ...(data.warnings && data.warnings.length
-        ? [
-            { text: 'Warnings', style: 'h2', margin: [0, 14, 0, 6] },
-            { ul: data.warnings, style: 'td' },
-          ]
+        ? [{ text: 'Warnings', style: 'h2', margin: [0, 14, 0, 6] }, { ul: data.warnings, style: 'td' }]
         : []),
-      {
-        text: 'Estimates only — derived from public Azure Retail Prices. Real invoices may differ.',
-        style: 'sub',
-        margin: [0, 18, 0, 0],
-      },
+      { text: 'Estimates only — derived from public Azure Retail Prices. Real invoices may differ.', style: 'sub', margin: [0, 18, 0, 0] },
     ],
     styles: {
       h1: { fontSize: 18, bold: true, color: '#1a2347' },
