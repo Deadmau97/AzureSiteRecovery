@@ -1407,16 +1407,6 @@ async function renderScenarioChart() {
   summary.innerHTML = lines;
 }
 
-// Snapshot a chart canvas to a PNG data URL, sized for embedding in pdfmake.
-// Returns null if the canvas is missing or cannot be exported.
-function chartImage(id) {
-  try {
-    const c = document.getElementById(id);
-    if (!c || !c.toDataURL) return null;
-    return c.toDataURL('image/png', 1.0);
-  } catch (_) { return null; }
-}
-
 // Build and download the estimate PDF. The `view` argument decides whether
 // the partner discount and the partner-cost column are visible:
 //   - 'partner'  \u2192 includes discount header, Partner column on every table,
@@ -1430,12 +1420,6 @@ function downloadEstimatePdf(view) {
   const showPartnerCol = isPartner && state.discountPct > 0;
   const dateStr = new Date().toISOString().slice(0, 10);
   const filename = `azure-estimate-${isPartner ? 'partner' : 'customer'}-${data.region}-${dateStr}.pdf`;
-
-  // Capture chart images first (before any layout work) so we don't accidentally
-  // capture them while they are being torn down.
-  const imgScenarios = chartImage('chartScenarios');
-  const imgByType = chartImage('chartByType');
-  const imgByItem = chartImage('chartByItem');
 
   // Summary table (one row per item).
   const summaryHead = showPartnerCol
@@ -1533,19 +1517,6 @@ function downloadEstimatePdf(view) {
     ];
   });
 
-  // Charts \u2014 the scenario chart is always placed first per the partner spec.
-  // pdfmake renders images by data URL when given { image: 'data:...' }.
-  const chartBlock = (img, caption) => img ? [
-    { image: img, width: 500, margin: [0, 6, 0, 4] },
-    { text: caption, style: 'sub', margin: [0, 0, 0, 10] },
-  ] : [];
-  const chartsSection = [
-    { text: 'Cost scenarios & breakdown', style: 'h2', margin: [0, 14, 0, 6] },
-    ...chartBlock(imgScenarios, 'PAYG vs 3-Year RI vs RI + Hybrid Benefit (top chart)'),
-    ...chartBlock(imgByType, 'Cost by service type'),
-    ...chartBlock(imgByItem, 'Top items by monthly cost'),
-  ];
-
   // Meta header rows.
   const metaBody = [
     [{ text: 'Region', style: 'metaKey' }, { text: data.region, style: 'metaVal' }],
@@ -1571,7 +1542,6 @@ function downloadEstimatePdf(view) {
       { text: title, style: 'h1' },
       { text: subtitle, style: 'sub', margin: [0, 0, 0, 10] },
       { table: { widths: [110, '*'], body: metaBody }, layout: 'noBorders', margin: [0, 0, 0, 10] },
-      ...chartsSection,
       { text: 'Summary', style: 'h2', margin: [0, 14, 0, 6] },
       { table: { headerRows: 1, widths: summaryWidths, body: itemsRows }, layout: { hLineColor: '#d6dbf0', vLineColor: '#d6dbf0' } },
       { text: 'Per-item breakdown', style: 'h2', margin: [0, 16, 0, 6] },

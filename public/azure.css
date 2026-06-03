@@ -803,3 +803,11 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
 .pill.billing-payg { background: rgba(110, 168, 255, 0.18); color: #6ea8ff; border:1px solid rgba(110,168,255,0.35); }
 .pill.billing-ri   { background: rgba(180, 140, 255, 0.18); color: #b48cff; border:1px solid rgba(180,140,255,0.35); }
 .pill.billing-payg, .pill.billing-ri { font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; vertical-align: middle; }
+
+/* Color overrides: customer (list) price = white, partner price = blue ---- */
+.grand-total,
+.grand-total .grand-list { color: var(--text); }
+.grand-total .grand-partner { color: var(--accent); }
+.result-row-head .total { color: var(--text); }
+.result-vm-line .amount { color: var(--text); }
+.partner-amount { color: var(--accent); }
