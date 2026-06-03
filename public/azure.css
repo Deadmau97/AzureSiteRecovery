@@ -531,6 +531,11 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   border-radius: 14px;
   width: 100%;
   max-width: 420px;
+  /* Constrain the whole modal so very small viewports show the footer.
+     The body scrolls; header & footer stay pinned. */
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
   box-shadow: 0 30px 80px -20px rgba(0,0,0,0.6);
   overflow: hidden;
 }
@@ -541,12 +546,17 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   justify-content: space-between;
   padding: 14px 18px;
   border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
 }
 .modal header h3 { margin: 0; font-size: 15px; }
 .modal-body {
   padding: 16px 18px;
   display: grid;
   gap: 12px;
+  /* Allow the body to scroll independently when the content overflows. */
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .modal-body p { margin: 0; font-size: 13px; line-height: 1.55; }
 .modal-subtitle { font-size: 12px; line-height: 1.5; }
@@ -580,6 +590,7 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
   padding: 12px 18px;
   border-top: 1px solid var(--line);
   background: rgba(255,255,255,0.02);
+  flex-shrink: 0;
 }
 
 /* Responsive ------------------------------------------------------------ */

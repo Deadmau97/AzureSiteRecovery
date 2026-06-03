@@ -73,6 +73,7 @@ const state = {
   currency: 'EUR',
   rows: [],
   diskTiers: { 'Standard SSD': [], 'Premium SSD': [] },
+  diskPrices: { 'Standard SSD': {}, 'Premium SSD': {} },
   vpnSkus: [],
   natSkus: [],
   publicIpSkus: [],
@@ -169,14 +170,19 @@ async function loadDiskTiers() {
 async function loadServiceCatalogs() {
   if (!state.region) return;
   try {
-    const [vpn, nat, ip] = await Promise.all([
+    const [vpn, nat, ip, dStd, dPrem] = await Promise.all([
       fetch(`/api/azure/vpn-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
       fetch(`/api/azure/nat-skus?currency=${state.currency}`).then((x) => x.json()),
       fetch(`/api/azure/publicip-skus?region=${state.region}&currency=${state.currency}`).then((x) => x.json()),
+      fetch(`/api/disk-prices?region=${state.region}&family=Standard%20SSD&currency=${state.currency}`).then((x) => x.json()),
+      fetch(`/api/disk-prices?region=${state.region}&family=Premium%20SSD&currency=${state.currency}`).then((x) => x.json()),
     ]);
     state.vpnSkus = vpn || [];
     state.natSkus = nat || [];
     state.publicIpSkus = ip || [];
+    // Build sku -> monthly price maps so the disk row can show the cost inline.
+    state.diskPrices['Standard SSD'] = Object.fromEntries((dStd?.rows || []).map((r) => [r.sku, r.retailPrice]));
+    state.diskPrices['Premium SSD'] = Object.fromEntries((dPrem?.rows || []).map((r) => [r.sku, r.retailPrice]));
   } catch (e) {
     console.error('catalog fetch failed', e);
   }
@@ -394,6 +400,8 @@ function makeRow(type, prefill = {}) {
         name: prefill.name || `PublicIP-${countRows('ip') + 1}`,
         count: prefill.count || 1,
         skuName: prefill.skuName || d.ipSku || 'Standard',
+        parentVpnId: prefill.parentVpnId || null,
+        parentNatId: prefill.parentNatId || null,
       };
     case 'backup':
       return {
@@ -429,8 +437,6 @@ function makeRow(type, prefill = {}) {
         id, type: 'vpn',
         name: prefill.name || `vpn-gw-${countRows('vpn') + 1}`,
         skuName: prefill.skuName || state.vpnSkus[0]?.skuName || null,
-        publicIp: prefill.publicIp ?? false,
-        publicIpSku: prefill.publicIpSku || 'Standard',
       };
     case 'nat':
       return {
@@ -438,8 +444,6 @@ function makeRow(type, prefill = {}) {
         name: prefill.name || `nat-gw-${countRows('nat') + 1}`,
         skuName: prefill.skuName || state.natSkus[0]?.skuName || 'Standard',
         dataProcessedGiB: prefill.dataProcessedGiB ?? 100,
-        publicIp: prefill.publicIp ?? false,
-        publicIpSku: prefill.publicIpSku || 'Standard',
       };
     default:
       throw new Error(`Unknown row type: ${type}`);
@@ -449,7 +453,11 @@ function makeRow(type, prefill = {}) {
 function countRows(type) { return state.rows.filter((r) => r.type === type).length; }
 
 function removeRow(id) {
-  state.rows = state.rows.filter((r) => r.id !== id && r.parentVmId !== id);
+  // Cascade-delete any rows that are children of the removed row
+  // (backups attached to a VM, public IPs attached to a VPN/NAT gateway).
+  state.rows = state.rows.filter(
+    (r) => r.id !== id && r.parentVmId !== id && r.parentVpnId !== id && r.parentNatId !== id
+  );
   renderRows();
   schedulePreview();
 }
@@ -462,7 +470,10 @@ function copyRow(id) {
   const clone = JSON.parse(JSON.stringify(src));
   delete clone.id;
   clone.name = `${src.name} - Copy`;
+  // The clone is a fresh top-level item: detach it from any parent.
   clone.parentVmId = null;
+  clone.parentVpnId = null;
+  clone.parentNatId = null;
   // Add at the end of the list (per spec).
   const row = makeRow(clone.type, clone);
   state.rows.push(row);
@@ -643,7 +654,9 @@ function renderVmDisk(vm, disk, idx) {
   function recomputeSku() {
     const t = pickDiskTier(disk.family, disk.sizeGiB);
     disk.sku = t ? t.sku : null;
-    sku.textContent = t ? t.sku : '—';
+    if (!t) { sku.textContent = '—'; return; }
+    const price = state.diskPrices[disk.family]?.[t.sku];
+    sku.textContent = price != null ? `${t.sku} — ${fmt(price)} /mo` : t.sku;
   }
 
   label.addEventListener('input', () => { if (!isOs) disk.label = label.value; });
@@ -812,18 +825,8 @@ function renderVpnRow(row) {
   if (row.skuName == null && sel.value) row.skuName = sel.value;
   sel.addEventListener('change', () => { row.skuName = sel.value || null; schedulePreview(); });
 
-  const pip = card.querySelector('.vpn-pip');
-  const pipWrap = card.querySelector('.vpn-pip-sku-wrap');
-  const pipSku = card.querySelector('.vpn-pip-sku');
-  pip.checked = !!row.publicIp;
-  pipWrap.hidden = !pip.checked;
-  populateIpSkuSelect(pipSku, row.publicIpSku || 'Standard');
-  pip.addEventListener('change', () => {
-    row.publicIp = pip.checked;
-    pipWrap.hidden = !pip.checked;
-    schedulePreview();
-  });
-  pipSku.addEventListener('change', () => { row.publicIpSku = pipSku.value; schedulePreview(); });
+  const addPipBtn = card.querySelector('.add-pip-btn');
+  if (addPipBtn) addPipBtn.addEventListener('click', () => onAddPublicIp(row));
   return card;
 }
 
@@ -854,18 +857,8 @@ function renderNatRow(row) {
   sel.addEventListener('change', () => { row.skuName = sel.value || null; schedulePreview(); });
   data.addEventListener('change', () => { row.dataProcessedGiB = +data.value || 0; schedulePreview(); });
 
-  const pip = card.querySelector('.nat-pip');
-  const pipWrap = card.querySelector('.nat-pip-sku-wrap');
-  const pipSku = card.querySelector('.nat-pip-sku');
-  pip.checked = !!row.publicIp;
-  pipWrap.hidden = !pip.checked;
-  populateIpSkuSelect(pipSku, row.publicIpSku || 'Standard');
-  pip.addEventListener('change', () => {
-    row.publicIp = pip.checked;
-    pipWrap.hidden = !pip.checked;
-    schedulePreview();
-  });
-  pipSku.addEventListener('change', () => { row.publicIpSku = pipSku.value; schedulePreview(); });
+  const addPipBtn = card.querySelector('.add-pip-btn');
+  if (addPipBtn) addPipBtn.addEventListener('click', () => onAddPublicIp(row));
   return card;
 }
 
@@ -889,6 +882,20 @@ function onAddBackup(vm) {
   state.rows = state.rows.filter((r) => !(r.type === 'backup' && r.parentVmId === vm.id));
   const sourceSize = computeVmSourceSize(vm.id);
   addRow('backup', { name: `Backup - ${vm.name}`, parentVmId: vm.id, sourceSizeGiB: sourceSize }, vm.id);
+}
+
+// ---------- Add Public IP child to a VPN / NAT gateway ----------
+// Mirrors onAddBackup: removes any previously attached child IP, then adds one
+// fresh ip row right below the parent. The IP carries parentVpnId / parentNatId
+// so removeRow cascades when the parent gateway is deleted.
+function onAddPublicIp(parent) {
+  const parentKey = parent.type === 'vpn' ? 'parentVpnId' : 'parentNatId';
+  state.rows = state.rows.filter((r) => !(r.type === 'ip' && r[parentKey] === parent.id));
+  addRow(
+    'ip',
+    { name: `PublicIP - ${parent.name}`, [parentKey]: parent.id, count: 1 },
+    parent.id
+  );
 }
 
 function computeVmSourceSize(vmId) {
