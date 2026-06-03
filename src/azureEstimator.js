@@ -52,14 +52,27 @@ export function estimateAzure(input) {
             const hours = isPayg
               ? Math.min(HOURS_PER_MONTH, Math.max(0, Number(row.hoursPerMonth) || HOURS_PER_MONTH))
               : HOURS_PER_MONTH;
-            const m = eff.hourly * hours;
-            monthly += m;
             const uptimeDetail = isPayg && hours < HOURS_PER_MONTH ? ` @ ${hours}h/mo` : '';
-            lineItems.push({
-              category: 'Compute',
-              detail: `${row.recommendedVm} \u2014 ${os} \u2014 ${eff.detail}${eff.hybridBenefit && os === 'windows' ? ' (AHB applied)' : ''}${uptimeDetail}`,
-              amount: m,
-            });
+
+            // Emit one line item per breakdown component (compute + optional Windows
+            // license adder). When no breakdown is published, fall back to a single
+            // line for backward compatibility with older `findVmEffectiveHourly`
+            // payloads that returned only `hourly`.
+            const parts = Array.isArray(eff.breakdown) && eff.breakdown.length
+              ? eff.breakdown
+              : [{ label: 'Compute', hourly: eff.hourly }];
+            for (const part of parts) {
+              const m = part.hourly * hours;
+              monthly += m;
+              const isLicense = /license/i.test(part.label);
+              lineItems.push({
+                category: isLicense ? 'Windows OS license' : 'Compute',
+                detail: isLicense
+                  ? `${row.recommendedVm} \u2014 ${part.label}${uptimeDetail}`
+                  : `${row.recommendedVm} \u2014 ${os} \u2014 ${eff.detail}${eff.hybridBenefit && os === 'windows' ? ' (AHB applied)' : ''}${uptimeDetail}`,
+                amount: m,
+              });
+            }
           } else {
             warnings.push(`No compute price for ${row.recommendedVm} (${os}) in ${armRegionName}/${currency}.`);
           }

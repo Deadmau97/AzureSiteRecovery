@@ -521,8 +521,23 @@ export function findVmReservationPrice(currency, armRegionName, armSkuName, os, 
 
 /**
  * Effective hourly price for a VM combining OS, reservation and Hybrid Benefit.
- * Hybrid Benefit (AHB) on Windows lets you "bring your own" Windows license, so the
- * effective compute price collapses to the Linux PAYG/RI price for the same SKU.
+ *
+ * Important Azure pricing detail:
+ *   Reserved Instance (RI) prices on the Retail Prices API are COMPUTE-ONLY \u2014
+ *   they do not include the Windows OS license. When you buy a 1Y/3Y RI for a
+ *   Windows VM you still pay for the Windows license per-hour at PAYG rates,
+ *   unless you bring it via Azure Hybrid Benefit (AHB).
+ *
+ * So:
+ *   - Linux PAYG  \u2192 Linux PAYG hourly                                                (single line)
+ *   - Linux RI    \u2192 Linux RI effective hourly                                         (single line)
+ *   - Windows PAYG, no AHB \u2192 Windows PAYG hourly                                       (single line)
+ *   - Windows PAYG + AHB   \u2192 Linux PAYG hourly                                         (single line)
+ *   - Windows RI, no AHB   \u2192 Linux RI effective hourly + (Windows PAYG \u2212 Linux PAYG) (two lines)
+ *   - Windows RI + AHB     \u2192 Linux RI effective hourly                                 (single line)
+ *
+ * Returns { hourly, breakdown:[{label, hourly}], detail, ... } so the estimator
+ * can render a separate line item for the Windows license adder when it applies.
  *
  * @param opts.reservation 'payg' | '1y' | '3y'
  * @param opts.hybridBenefit boolean
@@ -530,39 +545,70 @@ export function findVmReservationPrice(currency, armRegionName, armSkuName, os, 
 export function findVmEffectiveHourly(currency, armRegionName, armSkuName, os, opts = {}) {
   const reservation = opts.reservation || 'payg';
   const hybridBenefit = !!opts.hybridBenefit;
+  const isWindows = os === 'windows';
+  const isRi = reservation === '1y' || reservation === '3y';
+  const term = reservation === '3y' ? '3 Years' : '1 Year';
 
-  // AHB collapses Windows compute to the Linux rate for the same SKU.
-  const effectiveOs = hybridBenefit && os === 'windows' ? 'linux' : os;
+  // ---- Reserved Instance ----
+  if (isRi) {
+    // RI is compute-only; always look up the Linux RI for the SKU. We then add
+    // the Windows license adder separately when the workload is Windows + no AHB.
+    const ri = findVmReservationPrice(currency, armRegionName, armSkuName, 'linux', term);
+    if (!ri) {
+      // Fall through to PAYG below if this region/sku has no RI.
+    } else {
+      const breakdown = [
+        {
+          label: `${term} RI compute`,
+          hourly: ri.effectiveHourly,
+        },
+      ];
+      let total = ri.effectiveHourly;
+      let detail = `${term} RI \u2013 ${ri.skuName}`;
 
-  if (reservation === '1y' || reservation === '3y') {
-    const term = reservation === '3y' ? '3 Years' : '1 Year';
-    const ri = findVmReservationPrice(currency, armRegionName, armSkuName, effectiveOs, term);
-    if (ri) {
+      if (isWindows && !hybridBenefit) {
+        // Windows license adder = Windows PAYG \u2212 Linux PAYG for the same SKU.
+        const winPayg = findVmPrice(currency, armRegionName, armSkuName, 'windows');
+        const lnxPayg = findVmPrice(currency, armRegionName, armSkuName, 'linux');
+        if (winPayg && lnxPayg) {
+          const licenseHourly = Math.max(0, winPayg.retailPrice - lnxPayg.retailPrice);
+          breakdown.push({ label: 'Windows OS license (PAYG)', hourly: licenseHourly });
+          total += licenseHourly;
+          detail += ' + Windows license (PAYG)';
+        }
+      } else if (isWindows && hybridBenefit) {
+        detail += ' + AHB (no Windows license)';
+      }
+
       return {
-        hourly: ri.effectiveHourly,
+        hourly: total,
+        breakdown,
         source: 'reservation',
         reservation,
         hybridBenefit,
         os,
-        effectiveOs,
-        detail: `${term} RI \u2013 ${ri.skuName}`,
+        effectiveOs: 'linux', // RI compute is always priced at Linux rate
+        detail,
         productName: ri.productName,
         currency,
       };
     }
-    // Fall back to PAYG if RI not found.
   }
 
+  // ---- Pay-as-you-go ----
+  // AHB on Windows collapses compute to the Linux rate.
+  const effectiveOs = hybridBenefit && isWindows ? 'linux' : (isWindows ? 'windows' : 'linux');
   const payg = findVmPrice(currency, armRegionName, armSkuName, effectiveOs);
   if (!payg) return null;
   return {
     hourly: payg.retailPrice,
+    breakdown: [{ label: 'PAYG compute', hourly: payg.retailPrice }],
     source: 'payg',
     reservation: 'payg',
     hybridBenefit,
     os,
     effectiveOs,
-    detail: hybridBenefit && os === 'windows' ? 'PAYG (Linux rate, Windows AHB)' : 'PAYG',
+    detail: hybridBenefit && isWindows ? 'PAYG (Linux rate, Windows AHB)' : 'PAYG',
     productName: payg.productName,
     currency,
   };
