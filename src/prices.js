@@ -119,8 +119,11 @@ export async function warmCache({ verbose = true } = {}) {
       const appSvcFilter = `serviceName eq 'Azure App Service' and ${regionFilter} and priceType eq 'Consumption'`;
       // 13. Azure Files — Files v2 (Standard/Hot/Cool) + Premium Files
       const filesFilter = `serviceName eq 'Storage' and (productName eq 'Files v2' or productName eq 'Premium Files') and ${regionFilter} and priceType eq 'Consumption'`;
+      // 14. Premium SSD v2 + Ultra Disks — capacity / IOPS / throughput meters
+      // (these are billed per provisioned unit, not by tier ladder).
+      const flexDiskFilter = `serviceName eq 'Storage' and (productName eq 'Azure Premium SSD v2' or productName eq 'Ultra Disks') and ${regionFilter} and priceType eq 'Consumption'`;
 
-      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles, flexDisks] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
@@ -134,6 +137,7 @@ export async function warmCache({ verbose = true } = {}) {
         fetchAllPages(natFilter, currency, { pageLimit: 5 }),
         fetchAllPages(appSvcFilter, currency, { pageLimit: 80 }),
         fetchAllPages(filesFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(flexDiskFilter, currency, { pageLimit: 30 }),
       ]);
 
       cache[currency] = {
@@ -150,6 +154,7 @@ export async function warmCache({ verbose = true } = {}) {
         natGateway,
         appServicePlan,
         azureFiles,
+        flexDisks,
         updatedAt: new Date(),
       };
 
@@ -250,6 +255,63 @@ export function findDiskPrice(currency, armRegionName, family, skuName) {
         currency,
       }
     : null;
+}
+
+// Premium SSD v2 / Ultra Disks pricing.
+// These are NOT tier-ladder priced — Azure bills three meters separately:
+//   - Capacity per provisioned GiB / month
+//   - IOPS per provisioned IOPS / month (for v2: 3000 IOPS included free; for Ultra: all metered)
+//   - Throughput per provisioned MB/s / month (for v2: 125 MB/s included; for Ultra: all metered)
+// `redundancy` defaults to 'LRS'.
+export function findFlexDiskPrice(currency, armRegionName, family /* 'Premium SSD v2' | 'Ultra Disk' */, sizeGiB, iops, throughputMBps, redundancy = 'LRS') {
+  const items = cache[currency]?.flexDisks || [];
+  const productName = family === 'Ultra Disk' ? 'Ultra Disks' : 'Azure Premium SSD v2';
+  const pool = items.filter((i) => i.armRegionName === armRegionName && i.productName === productName);
+  if (pool.length === 0) return null;
+
+  // The redundancy filter in this dataset is encoded in the skuName ("Premium LRS",
+  // "Ultra LRS", "Premium ZRS"). Filter loosely to the requested redundancy.
+  const inRed = pool.filter((i) => new RegExp(redundancy, 'i').test(i.skuName || ''));
+  const usable = inRed.length ? inRed : pool;
+
+  // Match meter rows by name. The Retail Prices API publishes them as e.g.
+  //   "Premium LRS Provisioned Capacity"
+  //   "Premium LRS Provisioned IOPS"
+  //   "Premium LRS Provisioned Throughput (MBps)"
+  // Ultra equivalents drop the "Premium" prefix.
+  const cap = usable.find((i) => /capacity/i.test(i.meterName || '') && !/throughput/i.test(i.meterName || ''));
+  const iopsM = usable.find((i) => /iops/i.test(i.meterName || ''));
+  const tputM = usable.find((i) => /throughput/i.test(i.meterName || ''));
+
+  // Free baseline allowances built into the GiB price for Premium SSD v2.
+  const freeIops = family === 'Premium SSD v2' ? 3000 : 0;
+  const freeMBps = family === 'Premium SSD v2' ? 125 : 0;
+
+  const sz = Math.max(0, Number(sizeGiB) || 0);
+  const ip = Math.max(0, Number(iops) || 0);
+  const tp = Math.max(0, Number(throughputMBps) || 0);
+
+  const lines = [];
+  let total = 0;
+  if (cap) {
+    const amt = (cap.retailPrice || 0) * sz;
+    total += amt;
+    lines.push({ part: 'capacity', amount: amt, detail: `${sz} GiB \u00d7 ${cap.retailPrice} /GiB-mo`, meterName: cap.meterName });
+  }
+  if (iopsM) {
+    const billable = Math.max(0, ip - freeIops);
+    const amt = (iopsM.retailPrice || 0) * billable;
+    if (amt > 0) total += amt;
+    lines.push({ part: 'iops', amount: amt, detail: `${billable} IOPS \u00d7 ${iopsM.retailPrice}${freeIops ? ` (${freeIops} free)` : ''}`, meterName: iopsM.meterName });
+  }
+  if (tputM) {
+    const billable = Math.max(0, tp - freeMBps);
+    const amt = (tputM.retailPrice || 0) * billable;
+    if (amt > 0) total += amt;
+    lines.push({ part: 'throughput', amount: amt, detail: `${billable} MB/s \u00d7 ${tputM.retailPrice}${freeMBps ? ` (${freeMBps} free)` : ''}`, meterName: tputM.meterName });
+  }
+  if (lines.length === 0) return null;
+  return { total, lines, currency };
 }
 
 export function findVmPrice(currency, armRegionName, armSkuName, os /* 'linux' | 'windows' */) {

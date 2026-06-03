@@ -310,8 +310,55 @@ function wireDefaultsModal() {
     state.defaults = readDefaultsModal();
     saveDefaults();
     modal.hidden = true;
+    // If the user already has rows in the inventory, offer to retro-apply the new
+    // defaults to all of them (preserving each row's OS, which is workload-specific).
+    if (state.rows.length > 0) {
+      const yes = window.confirm(
+        `Apply the new default settings to all ${state.rows.length} existing item(s)?\n\n` +
+        'The operating system selected on each VM will NOT be changed.\n' +
+        'Click Cancel to keep current per-row values.'
+      );
+      if (yes) applyDefaultsToAllRows();
+    }
     schedulePreview();
   });
+}
+
+// Re-apply state.defaults to every existing row, by row type. The VM OS field is
+// intentionally preserved per the user's spec. Any field not covered by defaults
+// (custom IOPS, sizes, names…) is left untouched.
+function applyDefaultsToAllRows() {
+  const d = state.defaults;
+  for (const row of state.rows) {
+    switch (row.type) {
+      case 'vm':
+        row.reservation = d.reservation;
+        row.hoursPerMonth = d.uptimeHours;
+        row.hybridBenefit = d.hybridBenefit;
+        // OS is deliberately preserved.
+        // Apply the default OS-disk family/size only to the OS disk; keep custom data disks.
+        if (Array.isArray(row.disks) && row.disks[0]) {
+          row.disks[0].family = d.osDiskFamily;
+          row.disks[0].sizeGiB = d.osDiskSize;
+        }
+        break;
+      case 'backup':
+        row.policy = d.backupPolicy;
+        row.retentionDays = d.backupRetention;
+        row.redundancy = d.backupRedundancy;
+        row.dailyChurnPct = d.backupChurn;
+        break;
+      case 'storage':
+        row.tier = d.blobTier;
+        row.redundancy = d.blobRedundancy;
+        break;
+      case 'ip':
+        row.skuName = d.ipSku || row.skuName || 'Standard';
+        break;
+      // 'files', 'vpn', 'nat' have no default-driven fields today — leave as-is.
+    }
+  }
+  renderRows();
 }
 
 function openDefaultsModal() { fillDefaultsModal(); $('#defaultsModal').hidden = false; }
@@ -687,10 +734,25 @@ function renderVmDisk(vm, disk, idx) {
   const size = node.querySelector('.vm-disk-size');
   const sku = node.querySelector('.vm-disk-sku');
   const removeBtn = node.querySelector('.vm-disk-remove');
+  const flexWrap = node.querySelector('.vm-disk-flex');
+  const iopsInput = node.querySelector('.vm-disk-iops');
+  const tputInput = node.querySelector('.vm-disk-tput');
+
+  // OS disks cannot use Premium SSD v2 / Ultra Disk — strip those options.
+  if (isOs) {
+    family.querySelectorAll('option').forEach((o) => {
+      if (o.value === 'Premium SSD v2' || o.value === 'Ultra Disk') o.remove();
+    });
+    if (disk.family === 'Premium SSD v2' || disk.family === 'Ultra Disk') {
+      disk.family = 'Standard SSD';
+    }
+  }
 
   label.value = disk.label;
   family.value = disk.family;
   size.value = disk.sizeGiB;
+  iopsInput.value = disk.iops || (disk.family === 'Ultra Disk' ? 1000 : 3000);
+  tputInput.value = disk.throughputMBps || (disk.family === 'Ultra Disk' ? 100 : 125);
 
   if (isOs) {
     label.value = 'OS disk';
@@ -699,9 +761,21 @@ function renderVmDisk(vm, disk, idx) {
     removeBtn.hidden = true;
     node.classList.add('os-disk');
   }
+  syncFlexVisibility();
   recomputeSku();
 
+  function syncFlexVisibility() {
+    const isFlex = disk.family === 'Premium SSD v2' || disk.family === 'Ultra Disk';
+    flexWrap.hidden = !isFlex;
+    sku.hidden = isFlex;
+  }
+
   function recomputeSku() {
+    if (disk.family === 'Premium SSD v2' || disk.family === 'Ultra Disk') {
+      // No tier ladder — the cost lives on the row total via /api/azure/estimate.
+      disk.sku = null;
+      return;
+    }
     const t = pickDiskTier(disk.family, disk.sizeGiB);
     disk.sku = t ? t.sku : null;
     if (!t) { sku.textContent = '—'; return; }
@@ -710,8 +784,28 @@ function renderVmDisk(vm, disk, idx) {
   }
 
   label.addEventListener('input', () => { if (!isOs) disk.label = label.value; });
-  family.addEventListener('change', () => { disk.family = family.value; recomputeSku(); schedulePreview(); });
+  family.addEventListener('change', () => {
+    disk.family = family.value;
+    // Seed sensible IOPS / throughput when switching to a flex disk so the
+    // estimator has values to work with even before the user opens the inputs.
+    if (disk.family === 'Premium SSD v2') {
+      if (!disk.iops) disk.iops = 3000;
+      if (!disk.throughputMBps) disk.throughputMBps = 125;
+      iopsInput.value = disk.iops;
+      tputInput.value = disk.throughputMBps;
+    } else if (disk.family === 'Ultra Disk') {
+      if (!disk.iops) disk.iops = 1000;
+      if (!disk.throughputMBps) disk.throughputMBps = 100;
+      iopsInput.value = disk.iops;
+      tputInput.value = disk.throughputMBps;
+    }
+    syncFlexVisibility();
+    recomputeSku();
+    schedulePreview();
+  });
   size.addEventListener('change', () => { disk.sizeGiB = +size.value || 0; recomputeSku(); schedulePreview(); });
+  iopsInput.addEventListener('change', () => { disk.iops = +iopsInput.value || 0; schedulePreview(); });
+  tputInput.addEventListener('change', () => { disk.throughputMBps = +tputInput.value || 0; schedulePreview(); });
   removeBtn.addEventListener('click', () => {
     if (isOs) return;
     vm.disks = vm.disks.filter((d) => d.id !== disk.id);
@@ -1096,6 +1190,7 @@ function showResultsView(r) {
 
 let chartByType = null;
 let chartByItem = null;
+let chartScenarios = null;
 
 function renderCharts(r) {
   if (typeof Chart === 'undefined') return;
@@ -1107,6 +1202,7 @@ function renderCharts(r) {
 
   if (chartByType) chartByType.destroy();
   if (chartByItem) chartByItem.destroy();
+  if (chartScenarios) chartScenarios.destroy();
 
   chartByType = new Chart($('#chartByType'), {
     type: 'doughnut',
@@ -1151,6 +1247,81 @@ function renderCharts(r) {
       },
     },
   });
+
+  // Render the reservation / Hybrid Benefit scenario comparison.
+  // Async — runs three estimates with different VM overrides in parallel.
+  renderScenarioChart().catch((err) => console.error('scenario chart error', err));
+}
+
+// What-if comparison: re-runs the same inventory under three combinations of
+// reservation + Hybrid Benefit so the user can see the cheapest configuration.
+// Only VM rows are altered; other services contribute the same total in all 3.
+async function renderScenarioChart() {
+  const canvas = $('#chartScenarios');
+  const summary = $('#scenarioSummary');
+  if (!canvas || typeof Chart === 'undefined') return;
+
+  const variants = [
+    { key: 'payg', label: 'PAYG, no HB', reservation: 'payg', hybridBenefit: false },
+    { key: 'ri3', label: '3-Year RI, no HB', reservation: '3y', hybridBenefit: false },
+    { key: 'ri3hb', label: '3-Year RI + HB', reservation: '3y', hybridBenefit: true },
+  ];
+
+  const buildRows = (v) => state.rows.map((r) => {
+    if (r.type !== 'vm') return r;
+    return { ...r, reservation: v.reservation, hybridBenefit: v.hybridBenefit };
+  });
+
+  let results;
+  try {
+    results = await Promise.all(variants.map((v) => fetch('/api/azure/estimate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: state.region, currency: state.currency, rows: buildRows(v) }),
+    }).then((x) => x.json())));
+  } catch (e) {
+    summary.textContent = 'Scenario comparison failed: ' + e.message;
+    return;
+  }
+
+  const totals = results.map((r) => +(r.grandMonthly || 0));
+  const cheapestIdx = totals.indexOf(Math.min(...totals));
+  const baseline = totals[0];
+
+  if (chartScenarios) chartScenarios.destroy();
+  chartScenarios = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: variants.map((v) => v.label),
+      datasets: [{
+        label: 'Monthly cost',
+        data: totals.map((v) => +v.toFixed(2)),
+        backgroundColor: variants.map((v, i) => i === cheapestIdx ? '#46d39a' : '#6ea8ff'),
+        borderRadius: 6,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => fmt(ctx.parsed.y) } },
+      },
+      scales: {
+        x: { ticks: { color: '#cfd6f5' }, grid: { display: false } },
+        y: { ticks: { color: '#cfd6f5', callback: (v) => fmt(v) }, grid: { color: 'rgba(255,255,255,0.05)' } },
+      },
+    },
+  });
+
+  const lines = variants.map((v, i) => {
+    const total = totals[i];
+    const delta = total - baseline;
+    const pct = baseline > 0 ? (delta / baseline) * 100 : 0;
+    const tag = i === cheapestIdx ? ' <span class="pill good">cheapest</span>' : '';
+    const deltaTxt = i === 0 ? 'baseline' :
+      `${delta >= 0 ? '+' : '\u2212'}${fmt(Math.abs(delta))} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)`;
+    return `<div class="scenario-line"><span>${v.label}${tag}</span><span class="amount">${fmt(total)}</span><span class="muted">${deltaTxt}</span></div>`;
+  }).join('');
+  summary.innerHTML = lines;
 }
 
 function downloadEstimatePdf() {

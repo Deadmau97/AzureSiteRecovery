@@ -6,6 +6,7 @@
 import {
   findVmEffectiveHourly,
   findDiskPrice,
+  findFlexDiskPrice,
   findStandardPublicIpPricePerHour,
   findPublicIpPriceBySku,
   findBackupProtectedInstanceMonthly,
@@ -66,11 +67,34 @@ export function estimateAzure(input) {
         // Inline disks (index 0 is the OS disk, the rest are data disks added by the user)
         const disks = Array.isArray(row.disks) ? row.disks : [];
         disks.forEach((disk, idx) => {
-          if (!disk || !disk.sku) return;
+          if (!disk) return;
+          const label = idx === 0 ? 'OS disk' : `Data disk: ${disk.label || `Disk ${idx}`}`;
+
+          // Premium SSD v2 / Ultra Disk — priced per provisioned GiB + IOPS + MB/s.
+          if (disk.family === 'Premium SSD v2' || disk.family === 'Ultra Disk') {
+            const fp = findFlexDiskPrice(
+              currency, armRegionName, disk.family,
+              disk.sizeGiB, disk.iops, disk.throughputMBps
+            );
+            if (fp) {
+              monthly += fp.total;
+              const parts = fp.lines.map((l) => `${l.part}: ${l.detail}`).join(' · ');
+              lineItems.push({
+                category: label,
+                detail: `${disk.family} — ${disk.sizeGiB} GiB / ${disk.iops || 0} IOPS / ${disk.throughputMBps || 0} MB/s — ${parts}`,
+                amount: fp.total,
+              });
+            } else {
+              warnings.push(`No price for ${disk.family} in ${armRegionName}.`);
+            }
+            return;
+          }
+
+          // Standard SSD / Premium SSD — tier-ladder priced.
+          if (!disk.sku) return;
           const dp = findDiskPrice(currency, armRegionName, disk.family, disk.sku);
           if (dp) {
             monthly += dp.retailPrice;
-            const label = idx === 0 ? 'OS disk' : `Data disk: ${disk.label || `Disk ${idx}`}`;
             lineItems.push({
               category: label,
               detail: `${disk.family} ${disk.sku} (${disk.sizeGiB} GiB)`,

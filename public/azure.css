@@ -741,3 +741,41 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
 .row-card.reorder { outline: 1px dashed var(--accent); outline-offset: -2px; }
 .row-card .row-copy { color: var(--muted); }
 .row-card .row-copy:hover, .row-card .row-up:hover, .row-card .row-down:hover { color: var(--accent); }
+
+/* Premium SSD v2 / Ultra Disk extra knobs */
+.vm-disk-flex {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+}
+.vm-disk-flex[hidden] { display: none !important; }
+.vm-disk-row { flex-wrap: wrap; }
+
+/* Scenario comparison card on the results page */
+.scenario-card { margin-top: 16px; }
+.scenario-head { margin-bottom: 12px; }
+.scenario-head h3 { margin: 0 0 4px; }
+.scenario-summary {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px 16px;
+  margin-top: 14px;
+  font-size: 13px;
+  align-items: baseline;
+}
+.scenario-summary .scenario-line {
+  display: contents;
+}
+.scenario-summary .amount { font-weight: 600; color: var(--text); }
+.pill.good {
+  display: inline-block;
+  padding: 1px 8px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: rgba(70, 211, 154, 0.15);
+  color: var(--good);
+  font-size: 11px;
+  font-weight: 600;
+}

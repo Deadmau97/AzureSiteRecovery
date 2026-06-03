@@ -138,6 +138,21 @@
           </div>
         </div>
 
+        <!-- Reservation / Hybrid Benefit scenario comparison -->
+        <div class="chart-card scenario-card">
+          <div class="scenario-head">
+            <h3>What-if: PAYG vs 3-Year RI vs RI + Hybrid Benefit</h3>
+            <p class="muted">
+              Recomputes the same inventory with three combinations of reservation and Azure
+              Hybrid Benefit applied to every VM, so you can see the cheapest option at a glance.
+              Storage / network items are unaffected by RI &amp; HB and contribute the same total
+              in every scenario.
+            </p>
+          </div>
+          <canvas id="chartScenarios" height="180"></canvas>
+          <div id="scenarioSummary" class="scenario-summary"></div>
+        </div>
+
         <div id="resultsBody"></div>
       </section>
     </section>
@@ -361,12 +376,19 @@
         <select class="vm-disk-family">
           <option value="Standard SSD" selected>Standard SSD</option>
           <option value="Premium SSD">Premium SSD</option>
+          <option value="Premium SSD v2">Premium SSD v2</option>
+          <option value="Ultra Disk">Ultra Disk</option>
         </select>
         <input type="number" class="vm-disk-size" min="1" value="128" />
         <span class="vm-disk-sku muted">—</span>
         <button class="icon-btn vm-disk-remove" title="Remove disk" aria-label="Remove disk">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
         </button>
+        <!-- Flex-disk knobs: shown only for Premium SSD v2 / Ultra Disk. -->
+        <div class="vm-disk-flex" hidden>
+          <label class="field-flat"><span>IOPS</span><input type="number" class="vm-disk-iops" min="0" value="3000" /></label>
+          <label class="field-flat"><span>Throughput (MB/s)</span><input type="number" class="vm-disk-tput" min="0" value="125" /></label>
+        </div>
       </div>
     </template>
 
