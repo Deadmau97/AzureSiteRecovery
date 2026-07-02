@@ -82,6 +82,10 @@ export function getStatus() {
       natGatewayCount: cache[cur]?.natGateway?.length || 0,
       appServicePlanCount: cache[cur]?.appServicePlan?.length || 0,
       azureFilesCount: cache[cur]?.azureFiles?.length || 0,
+      sqlDatabaseCount: cache[cur]?.sqlDatabase?.length || 0,
+      sqlManagedInstanceCount: cache[cur]?.sqlManagedInstance?.length || 0,
+      mysqlCount: cache[cur]?.mysql?.length || 0,
+      postgresqlCount: cache[cur]?.postgresql?.length || 0,
     })),
   };
 }
@@ -124,8 +128,13 @@ export async function warmCache({ verbose = true } = {}) {
       // 14. Premium SSD v2 + Ultra Disks — capacity / IOPS / throughput meters
       // (these are billed per provisioned unit, not by tier ladder).
       const flexDiskFilter = `serviceName eq 'Storage' and (productName eq 'Azure Premium SSD v2' or productName eq 'Ultra Disks') and ${regionFilter} and priceType eq 'Consumption'`;
+      // 15–18. Managed database services (PaaS). vCore compute + storage meters.
+      const sqlDbFilter = `serviceName eq 'SQL Database' and ${regionFilter} and priceType eq 'Consumption'`;
+      const sqlMiFilter = `serviceName eq 'SQL Managed Instance' and ${regionFilter} and priceType eq 'Consumption'`;
+      const mysqlFilter = `serviceName eq 'Azure Database for MySQL' and ${regionFilter} and priceType eq 'Consumption'`;
+      const postgresFilter = `serviceName eq 'Azure Database for PostgreSQL' and ${regionFilter} and priceType eq 'Consumption'`;
 
-      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles, flexDisks] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles, flexDisks, sqlDatabase, sqlManagedInstance, mysql, postgresql] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
@@ -140,6 +149,10 @@ export async function warmCache({ verbose = true } = {}) {
         fetchAllPages(appSvcFilter, currency, { pageLimit: 80 }),
         fetchAllPages(filesFilter, currency, { pageLimit: 50 }),
         fetchAllPages(flexDiskFilter, currency, { pageLimit: 30 }),
+        fetchAllPages(sqlDbFilter, currency, { pageLimit: 200 }),
+        fetchAllPages(sqlMiFilter, currency, { pageLimit: 200 }),
+        fetchAllPages(mysqlFilter, currency, { pageLimit: 200 }),
+        fetchAllPages(postgresFilter, currency, { pageLimit: 200 }),
       ]);
 
       cache[currency] = {
@@ -157,6 +170,10 @@ export async function warmCache({ verbose = true } = {}) {
         appServicePlan,
         azureFiles,
         flexDisks,
+        sqlDatabase,
+        sqlManagedInstance,
+        mysql,
+        postgresql,
         updatedAt: new Date(),
       };
 
@@ -1014,3 +1031,97 @@ export function findAppServicePlanPrice(currency, armRegionName, productName, sk
       /hour/i.test(i.unitOfMeasure || '')
   ) || null;
 }
+
+// ---------- Managed database services (PaaS) ----------
+// Maps the frontend service `type` to the cache slot filled by warmCache.
+const DB_SLOTS = {
+  sqldb: 'sqlDatabase',
+  sqlmi: 'sqlManagedInstance',
+  mysql: 'mysql',
+  postgresql: 'postgresql',
+};
+
+// Heuristics: a "compute" meter is billed per hour and is not storage / backup /
+// IO / long-term-retention / networking. This lets us surface the real vCore
+// compute plans returned by the Retail Prices API without hardcoding fragile
+// SKU names per service.
+function isDbComputeMeter(i) {
+  const uom = i.unitOfMeasure || '';
+  const meter = i.meterName || '';
+  const product = i.productName || '';
+  if (!/hour/i.test(uom)) return false;
+  if (/storage|backup|ltr|long-term|io\b|i\/o|data stored|read|write|geo|network|bandwidth|point-in-time/i.test(meter)) return false;
+  if (/dtu/i.test(product) && /dtu/i.test(meter)) return true; // DTU compute
+  return /vcore|compute|gen5|gen4|gen8|memory optimized|business critical|general purpose|hyperscale|burstable|flexible|single|elastic/i.test(product + ' ' + meter);
+}
+
+function isDbStorageMeter(i) {
+  const uom = i.unitOfMeasure || '';
+  const meter = i.meterName || '';
+  if (!/gb\s*\/?\s*month|gib\s*\/?\s*month/i.test(uom)) return false;
+  if (/backup|ltr|long-term|geo/i.test(meter)) return false;
+  return /storage|data stored/i.test(meter) || /storage/i.test(i.productName || '');
+}
+
+/** List the available compute plans (hourly) for a managed database service. */
+export function listDbComputeSkus(currency, armRegionName, serviceKey) {
+  const slot = DB_SLOTS[serviceKey];
+  const items = cache[currency]?.[slot] || [];
+  const seen = new Map();
+  for (const i of items) {
+    if (i.armRegionName !== armRegionName) continue;
+    if (!isDbComputeMeter(i)) continue;
+    const key = `${i.productName || ''} \u2014 ${i.skuName || i.meterName || ''}`.trim();
+    if (!key || key === '\u2014') continue;
+    if (!seen.has(key)) {
+      seen.set(key, {
+        key,
+        skuName: i.skuName,
+        productName: i.productName,
+        meterName: i.meterName,
+        hourly: i.retailPrice,
+        monthly: i.retailPrice * HOURS_PER_MONTH,
+        unitOfMeasure: i.unitOfMeasure,
+      });
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.hourly - b.hourly);
+}
+
+/** Resolve one compute plan by its composite key (productName — skuName/meter). */
+export function findDbComputePrice(currency, armRegionName, serviceKey, key) {
+  const list = listDbComputeSkus(currency, armRegionName, serviceKey);
+  return list.find((x) => x.key === key) || null;
+}
+
+/** Cheapest per-GiB/month storage meter for a managed database service. */
+export function findDbStoragePricePerGiBMonth(currency, armRegionName, serviceKey) {
+  const slot = DB_SLOTS[serviceKey];
+  const items = cache[currency]?.[slot] || [];
+  const regional = items.filter((i) => i.armRegionName === armRegionName && isDbStorageMeter(i));
+  if (regional.length === 0) return null;
+  regional.sort((a, b) => a.retailPrice - b.retailPrice);
+  const hit = regional[0];
+  return { retailPrice: hit.retailPrice, unitOfMeasure: hit.unitOfMeasure, meterName: hit.meterName, currency };
+}
+
+// ---------- SQL Server on Azure VM (license surcharge) ----------
+// Azure bills SQL Server on a VM as a software surcharge per vCPU/hour on top of
+// the base VM compute. These are the published list rates (pay-as-you-go).
+// Developer and Express editions are free. SQL Azure Hybrid Benefit removes the
+// surcharge entirely (bring-your-own licence with Software Assurance).
+// Rates are per vCPU per hour, keyed by currency.
+const SQL_VM_LICENSE_PER_VCPU_HOUR = {
+  USD: { Enterprise: 0.5478, Standard: 0.1479, Web: 0.01126, Developer: 0, Express: 0 },
+  EUR: { Enterprise: 0.5040, Standard: 0.1361, Web: 0.01036, Developer: 0, Express: 0 },
+};
+
+export const SQL_VM_EDITIONS = ['Enterprise', 'Standard', 'Web', 'Developer', 'Express'];
+
+/** SQL Server on VM per-vCPU/hour licence rate for the edition & currency. */
+export function findSqlVmLicensePerVcpuHour(currency, edition) {
+  const table = SQL_VM_LICENSE_PER_VCPU_HOUR[currency] || SQL_VM_LICENSE_PER_VCPU_HOUR.USD;
+  const rate = table[edition];
+  return rate == null ? null : { perVcpuHour: rate, edition, currency };
+}
+

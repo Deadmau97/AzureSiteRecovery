@@ -34,6 +34,7 @@ import {
   listAppServicePlanSkus,
   listNatGatewaySkus,
   listPublicIpSkus,
+  listDbComputeSkus,
 } from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -148,6 +149,15 @@ app.get('/api/azure/publicip-skus', (req, res) => {
   const { region, currency } = req.query;
   if (!region) return res.status(400).json({ error: 'region is required' });
   res.json(listPublicIpSkus(currency || 'EUR', region));
+});
+
+// Managed database compute plans (Azure SQL DB / Managed Instance / MySQL / PostgreSQL).
+app.get('/api/azure/db-skus', (req, res) => {
+  const { region, currency, service } = req.query;
+  if (!region) return res.status(400).json({ error: 'region is required' });
+  const allowed = ['sqldb', 'sqlmi', 'mysql', 'postgresql'];
+  if (!allowed.includes(service)) return res.status(400).json({ error: 'unknown database service' });
+  res.json(listDbComputeSkus(currency || 'EUR', region, service));
 });
 
 // Debug: resolved monthly price for every disk tier in a region.

@@ -850,3 +850,7 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
 .config-result:hover { border-color: var(--accent); }
 .config-result .fqdn { font-weight: 600; }
 .config-result .muted { font-size: 11px; }
+
+/* Database rows + reliable hiding of conditional field wraps -------------- */
+.field-flat[hidden], .toggle-row[hidden] { display: none !important; }
+.row-card[data-type="db"] .row-icon { filter: none; }

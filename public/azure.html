@@ -365,9 +365,8 @@
               </div>
             </label>
             <label class="field-flat"><span>VM SKU</span><select class="vm-sku"></select></label>
-            <label class="field-flat vm-sku-search-wrap"><span>Find SKU (e.g. NC4 / D4s / GPU)</span>
+            <label class="field-flat vm-sku-search-wrap"><span>Find SKU</span>
               <input type="search" class="vm-sku-search" placeholder="Type to search any Azure VM SKU…" autocomplete="off" />
-              <small class="muted">Leave empty to use vCPU/RAM-based recommendations. Type to browse all SKUs incl. GPU / HPC.</small>
             </label>
             <label class="field-flat"><span>Reservation</span>
               <select class="vm-reservation">
@@ -378,11 +377,27 @@
             </label>
             <label class="field-flat vm-uptime-wrap"><span>Uptime (hours/mo)</span>
               <input type="number" class="vm-uptime" min="0" max="730" value="730" />
-              <small class="muted">Max 730 (24×7). Reservations are always full-month.</small>
             </label>
             <div class="field-flat toggle-row ahb-wrap">
               <span>Hybrid Benefit</span>
               <label class="switch"><input type="checkbox" class="vm-ahb" /><span class="slider"></span></label>
+            </div>
+            <div class="field-flat toggle-row sql-wrap">
+              <span>SQL Server</span>
+              <label class="switch"><input type="checkbox" class="vm-sql" /><span class="slider"></span></label>
+            </div>
+            <label class="field-flat vm-sql-edition-wrap" hidden><span>SQL edition</span>
+              <select class="vm-sql-edition">
+                <option value="Enterprise">Enterprise</option>
+                <option value="Standard">Standard</option>
+                <option value="Web">Web</option>
+                <option value="Developer">Developer (free)</option>
+                <option value="Express">Express (free)</option>
+              </select>
+            </label>
+            <div class="field-flat toggle-row vm-sql-ahb-wrap" hidden>
+              <span>SQL Hybrid Benefit</span>
+              <label class="switch"><input type="checkbox" class="vm-sql-ahb" /><span class="slider"></span></label>
             </div>
           </div>
           <section class="disks-block">
@@ -622,6 +637,34 @@
               </select>
             </label>
             <label class="field-flat"><span>Capacity (GiB)</span><input type="number" class="af-capacity" min="0" value="100" /></label>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <!-- Managed database row (Azure SQL DB / Managed Instance / MySQL / PostgreSQL) -->
+    <template id="dbRowTpl">
+      <article class="row-card" data-type="db">
+        <header class="row-head">
+          <button class="icon-btn row-collapse" aria-label="Collapse / expand" title="Collapse / expand">
+            <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <img class="row-icon" src="/icons/databases/10130-icon-service-SQL-Database.svg" alt="Database" />
+          <input class="field-flat row-name" placeholder="Database name" />
+          <span class="row-cost muted">—</span>
+          <button class="icon-btn row-remove" title="Remove" aria-label="Remove">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+          </button>
+        </header>
+        <div class="row-body">
+          <div class="row-fields">
+            <label class="field-flat db-compute-wrap"><span>Compute plan</span>
+              <select class="db-compute"></select>
+            </label>
+            <label class="field-flat db-search-wrap"><span>Find plan</span>
+              <input type="search" class="db-search" placeholder="Type to filter compute plans…" autocomplete="off" />
+            </label>
+            <label class="field-flat"><span>Storage (GiB)</span><input type="number" class="db-storage" min="0" value="32" /></label>
           </div>
         </div>
       </article>

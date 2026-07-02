@@ -47,6 +47,40 @@ const CATALOG = [
     icon: '/icons/networking/10310-icon-service-NAT.svg',
     keywords: ['nat', 'outbound', 'snat', 'egress', 'network'],
   },
+  // Managed database services. `hidden: true` keeps them out of the default
+  // catalog grid — they only appear when the user searches for them.
+  {
+    type: 'sqldb',
+    title: 'Azure SQL Database',
+    sub: 'Managed SQL (PaaS) — vCore',
+    icon: '/icons/databases/10130-icon-service-SQL-Database.svg',
+    keywords: ['sql', 'database', 'db', 'paas', 'managed', 'relational'],
+    hidden: true,
+  },
+  {
+    type: 'sqlmi',
+    title: 'Azure SQL Managed Instance',
+    sub: 'SQL MI — near-100% engine parity',
+    icon: '/icons/databases/10136-icon-service-SQL-Managed-Instance.svg',
+    keywords: ['sql', 'managed instance', 'mi', 'database', 'paas'],
+    hidden: true,
+  },
+  {
+    type: 'mysql',
+    title: 'Azure Database for MySQL',
+    sub: 'Flexible Server — vCore',
+    icon: '/icons/databases/10122-icon-service-Azure-Database-MySQL-Server.svg',
+    keywords: ['mysql', 'database', 'db', 'flexible', 'oss', 'paas'],
+    hidden: true,
+  },
+  {
+    type: 'postgresql',
+    title: 'Azure Database for PostgreSQL',
+    sub: 'Flexible Server — vCore',
+    icon: '/icons/databases/10131-icon-service-Azure-Database-PostgreSQL-Server.svg',
+    keywords: ['postgresql', 'postgres', 'pg', 'database', 'db', 'flexible', 'oss', 'paas'],
+    hidden: true,
+  },
 ];
 
 // ---------- Defaults applied to every new row (overridable per row) ----------
@@ -81,6 +115,8 @@ const state = {
   vpnSkus: [],
   natSkus: [],
   publicIpSkus: [],
+  // Managed database compute-plan lists, keyed by `${service}:${region}:${currency}`.
+  dbSkus: {},
   defaults: loadDefaults(),
   lastEstimate: null,
   collapsedAll: false,
@@ -320,6 +356,7 @@ async function loadRegions() {
   sel.value = state.region;
   sel.addEventListener('change', async () => {
     state.region = sel.value;
+    state.dbSkus = {};
     await loadServiceCatalogs();
     renderRows();
     schedulePreview();
@@ -340,6 +377,7 @@ async function loadCurrencies() {
   sel.value = state.currency;
   sel.addEventListener('change', async () => {
     state.currency = sel.value;
+    state.dbSkus = {};
     await loadServiceCatalogs();
     renderRows();
     pollStatus();
@@ -409,7 +447,9 @@ function renderServices(filter = '') {
   grid.innerHTML = '';
   const q = (filter || '').trim().toLowerCase();
   const matches = CATALOG.filter((svc) => {
-    if (!q) return true;
+    // Hidden services (databases) stay out of the default grid — they surface
+    // only when the user actively searches for them.
+    if (!q) return !svc.hidden;
     return [svc.title, svc.sub, svc.type, ...(svc.keywords || [])].join(' ').toLowerCase().includes(q);
   });
   if (matches.length === 0) {
@@ -619,6 +659,10 @@ function makeRow(type, prefill = {}) {
         reservation: prefill.reservation || d.reservation,
         hoursPerMonth: prefill.hoursPerMonth || d.uptimeHours,
         hybridBenefit: prefill.hybridBenefit ?? d.hybridBenefit,
+        // SQL Server on the VM (optional): edition + SQL Hybrid Benefit.
+        sql: prefill.sql ?? false,
+        sqlEdition: prefill.sqlEdition || 'Standard',
+        sqlHybridBenefit: prefill.sqlHybridBenefit ?? false,
         disks: (prefill.disks && prefill.disks.length
           ? prefill.disks
           : [{ label: 'OS disk', family: d.osDiskFamily, sizeGiB: d.osDiskSize }]
@@ -681,6 +725,19 @@ function makeRow(type, prefill = {}) {
         skuName: prefill.skuName || state.natSkus[0]?.skuName || 'Standard',
         dataProcessedGiB: prefill.dataProcessedGiB ?? 100,
       };
+    case 'sqldb':
+    case 'sqlmi':
+    case 'mysql':
+    case 'postgresql': {
+      const names = { sqldb: 'sqldb', sqlmi: 'sqlmi', mysql: 'mysql', postgresql: 'pg' };
+      return {
+        id, type,
+        name: prefill.name || `${names[type]}-${countRows(type) + 1}`,
+        computeKey: prefill.computeKey || null,
+        storageGiB: prefill.storageGiB ?? 32,
+        search: prefill.search || '',
+      };
+    }
     default:
       throw new Error(`Unknown row type: ${type}`);
   }
@@ -747,6 +804,10 @@ function renderRow(row) {
     case 'files': return renderFilesRow(row);
     case 'vpn': return renderVpnRow(row);
     case 'nat': return renderNatRow(row);
+    case 'sqldb':
+    case 'sqlmi':
+    case 'mysql':
+    case 'postgresql': return renderDbRow(row);
     default: return document.createElement('div');
   }
 }
@@ -821,6 +882,11 @@ function renderVmRow(row) {
   const disksList = card.querySelector('.disks-list');
   const addDiskBtn = card.querySelector('.add-disk-btn');
   const addBackupBtn = card.querySelector('.add-backup-btn');
+  const sqlToggle = card.querySelector('.vm-sql');
+  const sqlEditionWrap = card.querySelector('.vm-sql-edition-wrap');
+  const sqlEdition = card.querySelector('.vm-sql-edition');
+  const sqlAhbWrap = card.querySelector('.vm-sql-ahb-wrap');
+  const sqlAhb = card.querySelector('.vm-sql-ahb');
 
   vcpu.value = row.vcpu;
   ram.value = row.ramGiB;
@@ -830,6 +896,21 @@ function renderVmRow(row) {
   osBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.os === row.os));
   ahbWrap.classList.toggle('disabled', row.os !== 'windows');
   uptimeWrap.hidden = row.reservation !== 'payg';
+
+  // SQL Server on the VM.
+  sqlToggle.checked = !!row.sql;
+  sqlEdition.value = row.sqlEdition || 'Standard';
+  sqlAhb.checked = !!row.sqlHybridBenefit;
+  const syncSqlVisibility = () => {
+    sqlEditionWrap.hidden = !row.sql;
+    // Developer / Express are free, so Hybrid Benefit is irrelevant for them.
+    const paid = row.sql && row.sqlEdition !== 'Developer' && row.sqlEdition !== 'Express';
+    sqlAhbWrap.hidden = !paid;
+  };
+  syncSqlVisibility();
+  sqlToggle.addEventListener('change', () => { row.sql = sqlToggle.checked; syncSqlVisibility(); schedulePreview(); });
+  sqlEdition.addEventListener('change', () => { row.sqlEdition = sqlEdition.value; syncSqlVisibility(); schedulePreview(); });
+  sqlAhb.addEventListener('change', () => { row.sqlHybridBenefit = sqlAhb.checked; schedulePreview(); });
 
   row.disks.forEach((disk, idx) => disksList.appendChild(renderVmDisk(row, disk, idx)));
 
@@ -1208,6 +1289,83 @@ function populateNatSkuSelect(sel, current) {
     sel.appendChild(opt);
   }
   sel.value = current && state.natSkus.some((s) => s.skuName === current) ? current : state.natSkus[0].skuName;
+}
+
+// ---------- Managed database row ----------
+function renderDbRow(row) {
+  const card = $('#dbRowTpl').content.firstElementChild.cloneNode(true);
+  commonWire(card, row);
+  // Use the matching Azure service icon per DB type.
+  const icons = {
+    sqldb: '/icons/databases/10130-icon-service-SQL-Database.svg',
+    sqlmi: '/icons/databases/10136-icon-service-SQL-Managed-Instance.svg',
+    mysql: '/icons/databases/10122-icon-service-Azure-Database-MySQL-Server.svg',
+    postgresql: '/icons/databases/10131-icon-service-Azure-Database-PostgreSQL-Server.svg',
+  };
+  const iconEl = card.querySelector('.row-icon');
+  if (iconEl && icons[row.type]) iconEl.src = icons[row.type];
+
+  const computeSel = card.querySelector('.db-compute');
+  const search = card.querySelector('.db-search');
+  const storage = card.querySelector('.db-storage');
+  storage.value = row.storageGiB;
+  search.value = row.search || '';
+
+  // Fill the compute dropdown from the cached SKU list, filtered by the search box.
+  let allSkus = [];
+  const fill = () => {
+    const q = (row.search || '').trim().toLowerCase();
+    const list = q ? allSkus.filter((s) => s.key.toLowerCase().includes(q)) : allSkus;
+    computeSel.innerHTML = '';
+    if (list.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = allSkus.length === 0 ? 'No plans loaded (refresh prices)' : 'No plan matches';
+      computeSel.appendChild(opt);
+      return;
+    }
+    for (const s of list) {
+      const opt = document.createElement('option');
+      opt.value = s.key;
+      opt.textContent = `${s.key} — ${fmt(s.monthly)}/mo`;
+      computeSel.appendChild(opt);
+    }
+    if (row.computeKey && list.some((s) => s.key === row.computeKey)) {
+      computeSel.value = row.computeKey;
+    } else {
+      computeSel.value = list[0].key;
+      row.computeKey = list[0].key;
+    }
+  };
+
+  loadDbSkus(row.type).then((list) => { allSkus = list; fill(); schedulePreview(); });
+
+  computeSel.addEventListener('change', () => { row.computeKey = computeSel.value || null; schedulePreview(); });
+  storage.addEventListener('change', () => { row.storageGiB = +storage.value || 0; schedulePreview(); });
+  let searchTimer = null;
+  search.addEventListener('input', () => {
+    row.search = search.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(fill, 150);
+  });
+  return card;
+}
+
+// Fetch (and cache) the compute-plan list for a managed database service.
+async function loadDbSkus(service) {
+  state.dbSkus = state.dbSkus || {};
+  const key = `${service}:${state.region}:${state.currency}`;
+  if (state.dbSkus[key]) return state.dbSkus[key];
+  try {
+    const list = await fetch(
+      `/api/azure/db-skus?service=${service}&region=${state.region}&currency=${state.currency}`
+    ).then((x) => x.json());
+    state.dbSkus[key] = Array.isArray(list) ? list : [];
+  } catch (e) {
+    console.error('db-skus error', e);
+    state.dbSkus[key] = [];
+  }
+  return state.dbSkus[key];
 }
 
 // ---------- Add Backup from a VM ----------

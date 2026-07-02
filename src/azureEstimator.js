@@ -17,6 +17,9 @@ import {
   findVpnGatewayPrice,
   findNatGatewayPrice,
   findAppServicePlanPrice,
+  findDbComputePrice,
+  findDbStoragePricePerGiBMonth,
+  findSqlVmLicensePerVcpuHour,
   HOURS_PER_MONTH,
 } from './prices.js';
 
@@ -77,6 +80,34 @@ export function estimateAzure(input) {
                 amount: m,
                 billing,
               });
+            }
+
+            // SQL Server on the VM — software licence surcharge per vCPU/hour.
+            // Always billed PAYG (even under a compute reservation) and removed
+            // entirely when SQL Azure Hybrid Benefit is enabled.
+            if (row.sql && row.sqlEdition) {
+              const lic = findSqlVmLicensePerVcpuHour(currency, row.sqlEdition);
+              const vcpu = Math.max(1, Number(row.vcpu) || 1);
+              if (lic && !row.sqlHybridBenefit && lic.perVcpuHour > 0) {
+                const m = lic.perVcpuHour * vcpu * hours;
+                monthly += m;
+                lineItems.push({
+                  category: 'SQL Server license',
+                  detail: `SQL Server ${row.sqlEdition} \u2014 ${vcpu} vCPU\u00d7${lic.perVcpuHour}/vCPU/h${uptimeDetail}`,
+                  amount: m,
+                  billing: 'payg',
+                });
+              } else if (row.sql) {
+                const why = row.sqlHybridBenefit ? 'SQL Azure Hybrid Benefit applied'
+                  : (row.sqlEdition === 'Developer' || row.sqlEdition === 'Express') ? `${row.sqlEdition} edition is free`
+                  : 'no licence rate';
+                lineItems.push({
+                  category: 'SQL Server license',
+                  detail: `SQL Server ${row.sqlEdition} \u2014 ${why}`,
+                  amount: 0,
+                  billing: 'payg',
+                });
+              }
             }
           } else {
             warnings.push(`No compute price for ${row.recommendedVm} (${os}) in ${armRegionName}/${currency}.`);
@@ -312,6 +343,50 @@ export function estimateAzure(input) {
             const m = ip.retailPrice * HOURS_PER_MONTH;
             monthly += m;
             lineItems.push({ category: 'Public IP (NAT)', detail: `${ipSku} Static IPv4`, amount: m });
+          }
+        }
+        break;
+      }
+
+      case 'sqldb':
+      case 'sqlmi':
+      case 'mysql':
+      case 'postgresql': {
+        // Managed database services (PaaS). Priced as: selected compute plan
+        // (hourly \u00d7 730) + optional provisioned storage (GiB \u00d7 per-GiB/month).
+        const labels = {
+          sqldb: 'Azure SQL Database', sqlmi: 'Azure SQL Managed Instance',
+          mysql: 'Azure Database for MySQL', postgresql: 'Azure Database for PostgreSQL',
+        };
+        if (row.computeKey) {
+          const cp = findDbComputePrice(currency, armRegionName, row.type, row.computeKey);
+          if (cp) {
+            const m = cp.hourly * HOURS_PER_MONTH;
+            monthly += m;
+            lineItems.push({
+              category: labels[row.type] || 'Database',
+              detail: `${cp.key} \u2014 ${HOURS_PER_MONTH}h/mo`,
+              amount: m,
+              billing: 'payg',
+            });
+          } else {
+            warnings.push(`No compute price for ${labels[row.type]} plan "${row.computeKey}" in ${armRegionName}/${currency}.`);
+          }
+        }
+        const storageGiB = Math.max(0, Number(row.storageGiB) || 0);
+        if (storageGiB > 0) {
+          const sp = findDbStoragePricePerGiBMonth(currency, armRegionName, row.type);
+          if (sp) {
+            const m = sp.retailPrice * storageGiB;
+            monthly += m;
+            lineItems.push({
+              category: `${labels[row.type] || 'Database'} storage`,
+              detail: `${storageGiB} GiB provisioned`,
+              amount: m,
+              billing: 'payg',
+            });
+          } else {
+            warnings.push(`No storage price for ${labels[row.type]} in ${armRegionName}/${currency}.`);
           }
         }
         break;
