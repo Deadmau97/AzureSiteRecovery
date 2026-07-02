@@ -109,8 +109,174 @@ async function init() {
   wireDiscount();
   wireDefaultsModal();
   wireResultsView();
+  wireConfigModal();
   pollStatus();
   applyEmptyState();
+  await maybeLoadSharedConfig();
+}
+
+// ---------- Saved configurations (Azure SQL share links) ----------
+
+// If the page was opened through a share link (https://<host>/<code>), load
+// the saved configuration and hydrate the builder with it.
+async function maybeLoadSharedConfig() {
+  const m = location.pathname.match(/^\/([A-HJ-NP-Za-km-z2-9]{10})$/);
+  if (!m) return;
+  try {
+    const r = await fetch(`/api/configs/${m[1]}`).then((x) => x.json());
+    if (r.error) throw new Error(r.error);
+    await applySavedConfig(r.config, r.fqdn);
+    setStatusPillText(`Loaded "${r.fqdn}"`);
+  } catch (e) {
+    alert('Could not load shared configuration: ' + e.message);
+  }
+}
+
+function setStatusPillText(txt) {
+  const pill = $('#statusPill');
+  if (pill) pill.textContent = txt;
+}
+
+// Replace the current builder state with a saved configuration.
+async function applySavedConfig(config, fqdn) {
+  if (!config || !Array.isArray(config.rows)) throw new Error('Invalid configuration payload');
+  if (config.region) {
+    state.region = config.region;
+    $('#regionSelect').value = config.region;
+  }
+  if (config.currency) {
+    state.currency = config.currency;
+    $('#currencySelect').value = config.currency;
+  }
+  state.discountPct = Number(config.discountPct) || 0;
+  const dEl = $('#discountPct');
+  if (dEl) dEl.value = state.discountPct;
+  await loadServiceCatalogs();
+  state.rows = config.rows;
+  state.lastEstimate = null;
+  renderRows();
+  applyEmptyState();
+  schedulePreview();
+  document.title = `Azure Calculator — ${fqdn}`;
+}
+
+function currentConfigPayload() {
+  return {
+    region: state.region,
+    currency: state.currency,
+    discountPct: state.discountPct,
+    rows: state.rows,
+    savedAt: new Date().toISOString(),
+  };
+}
+
+function wireConfigModal() {
+  const modal = $('#configModal');
+  const savePane = $('#configSavePane');
+  const openPane = $('#configOpenPane');
+  const title = $('#configModalTitle');
+  const confirmBtn = $('#configSaveConfirm');
+  const resultBox = $('#configSaveResult');
+  const close = () => { modal.hidden = true; };
+
+  $('#saveConfigBtn').addEventListener('click', () => {
+    if (state.rows.length === 0) { alert('Add at least one service before saving.'); return; }
+    title.textContent = 'Save configuration';
+    savePane.hidden = false;
+    openPane.hidden = true;
+    confirmBtn.hidden = false;
+    resultBox.hidden = true;
+    resultBox.innerHTML = '';
+    modal.hidden = false;
+    $('#configFqdn').focus();
+  });
+
+  $('#openConfigBtn').addEventListener('click', () => {
+    title.textContent = 'Open saved configuration';
+    savePane.hidden = true;
+    openPane.hidden = false;
+    confirmBtn.hidden = true;
+    modal.hidden = false;
+    $('#configSearch').focus();
+  });
+
+  $('#configModalClose').addEventListener('click', close);
+  $('#configModalCancel').addEventListener('click', close);
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+  // Save & get link
+  confirmBtn.addEventListener('click', async () => {
+    const fqdn = $('#configFqdn').value.trim();
+    if (!fqdn) { alert('Enter a project FQDN / name.'); return; }
+    confirmBtn.disabled = true;
+    try {
+      const r = await fetch('/api/configs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fqdn, config: currentConfigPayload() }),
+      }).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      const url = `${location.origin}/${r.code}`;
+      resultBox.hidden = false;
+      resultBox.innerHTML = `
+        <p>Saved. Share link:</p>
+        <div class="share-link-row">
+          <input type="text" readonly value="${escapeHtml(url)}" id="shareLinkInput" />
+          <button class="btn ghost btn-sm" id="copyShareLinkBtn">Copy</button>
+        </div>`;
+      $('#copyShareLinkBtn').addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(url);
+          $('#copyShareLinkBtn').textContent = 'Copied!';
+        } catch (_) {
+          $('#shareLinkInput').select();
+          document.execCommand('copy');
+          $('#copyShareLinkBtn').textContent = 'Copied!';
+        }
+      });
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      confirmBtn.disabled = false;
+    }
+  });
+
+  // Search by FQDN (debounced)
+  let searchTimer = null;
+  $('#configSearch').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runConfigSearch, 250);
+  });
+
+  async function runConfigSearch() {
+    const q = $('#configSearch').value.trim();
+    const box = $('#configSearchResults');
+    if (!q) { box.innerHTML = ''; return; }
+    box.innerHTML = '<p class="muted">Searching…</p>';
+    try {
+      const list = await fetch(`/api/configs/search?fqdn=${encodeURIComponent(q)}`).then((x) => x.json());
+      if (list.error) throw new Error(list.error);
+      if (!list.length) { box.innerHTML = '<p class="muted">No saved configurations match.</p>'; return; }
+      box.innerHTML = list.map((c) => `
+        <button class="config-result" data-code="${escapeHtml(c.code)}">
+          <span class="fqdn">${escapeHtml(c.fqdn)}</span>
+          <span class="muted">${new Date(c.createdAt).toLocaleString()} · ${escapeHtml(c.code)}</span>
+        </button>`).join('');
+      $$('.config-result', box).forEach((btn) => btn.addEventListener('click', async () => {
+        try {
+          const r = await fetch(`/api/configs/${btn.dataset.code}`).then((x) => x.json());
+          if (r.error) throw new Error(r.error);
+          await applySavedConfig(r.config, r.fqdn);
+          history.replaceState(null, '', `/${r.code}`);
+          close();
+          setStatusPillText(`Loaded "${r.fqdn}"`);
+        } catch (e) {
+          alert('Load failed: ' + e.message);
+        }
+      }));
+    } catch (e) {
+      box.innerHTML = `<p class="muted">Search failed: ${escapeHtml(e.message)}</p>`;
+    }
+  }
 }
 
 // Live-bind the partner discount input so any change re-renders the results

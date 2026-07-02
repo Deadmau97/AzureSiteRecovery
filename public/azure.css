@@ -811,3 +811,42 @@ main { padding: 22px 24px 60px; max-width: 1400px; margin: 0 auto; }
 .result-row-head .total { color: var(--text); }
 .result-vm-line .amount { color: var(--text); }
 .partner-amount { color: var(--accent); }
+
+/* Three charts on one results row + saved-config modal ------------------- */
+.charts-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.charts-row .scenario-card { margin-top: 0; }
+.charts-row-3 .scenario-summary { font-size: 11px; }
+@media (max-width: 1100px) {
+  .charts-row-3 { grid-template-columns: 1fr; }
+}
+.config-save-result { margin-top: 12px; }
+.config-save-result p { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+.share-link-row { display: flex; gap: 8px; }
+.share-link-row input {
+  flex: 1 1 auto;
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-weight: 600;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.config-search-results { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.config-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+}
+.config-result:hover { border-color: var(--accent); }
+.config-result .fqdn { font-weight: 600; }
+.config-result .muted { font-size: 11px; }

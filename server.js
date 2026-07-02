@@ -15,12 +15,18 @@ import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { REGIONS, CURRENCIES, warmCache, getStatus } from './src/prices.js';
+import { REGIONS, CURRENCIES, warmCache, getStatus, hydrateCacheFromDb } from './src/prices.js';
 import { listTiers, DISK_FAMILIES } from './src/diskTiers.js';
 import { parseRvtoolsBuffer } from './src/rvtools.js';
 import { recommendVms, searchVms } from './src/recommender.js';
 import { estimateProject } from './src/estimator.js';
 import { estimateAzure } from './src/azureEstimator.js';
+import {
+  dbEnabled,
+  saveEstimateConfig,
+  getEstimateConfig,
+  searchEstimateConfigs,
+} from './src/db.js';
 import {
   findDiskPrice,
   findAsrPrice,
@@ -179,9 +185,81 @@ app.get('/api/asr-price', (req, res) => {
   res.json({ region, scenario, currency, hit });
 });
 
+// ---------- Saved configurations (Azure SQL) ----------
+// Mimics the official Azure Pricing Calculator share flow: saving returns a
+// short code; https://<host>/<code> reopens the exact configuration.
+
+function requireDb(res) {
+  if (!dbEnabled()) {
+    res.status(503).json({ error: 'Azure SQL Database is not configured. Set AZURE_SQL_CONNECTION_STRING (or AZURE_SQL_SERVER/DATABASE/USER/PASSWORD).' });
+    return false;
+  }
+  return true;
+}
+
+app.post('/api/configs', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { fqdn, config } = req.body || {};
+    if (!fqdn || typeof fqdn !== 'string' || !fqdn.trim()) {
+      return res.status(400).json({ error: 'fqdn (project name) is required' });
+    }
+    if (!config || !Array.isArray(config.rows)) {
+      return res.status(400).json({ error: 'config with a rows array is required' });
+    }
+    const { code } = await saveEstimateConfig(fqdn.trim().toLowerCase(), config);
+    res.json({ code, path: `/${code}` });
+  } catch (err) {
+    console.error('[configs] save error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/configs/search', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const fqdn = String(req.query.fqdn || '').trim();
+    if (!fqdn) return res.status(400).json({ error: 'fqdn query parameter is required' });
+    res.json(await searchEstimateConfigs(fqdn));
+  } catch (err) {
+    console.error('[configs] search error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/configs/:code', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const hit = await getEstimateConfig(req.params.code);
+    if (!hit) return res.status(404).json({ error: 'Configuration not found' });
+    res.json(hit);
+  } catch (err) {
+    console.error('[configs] load error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Share-link entry point: /<code> (10 base-62 chars) serves the calculator,
+// which reads the code from location.pathname and loads the saved config.
+app.get('/:code([A-HJ-NP-Za-km-z2-9]{10})', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'azure.html'));
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`[asr-estimator] listening on http://localhost:${PORT}`);
+  // Prefer hydrating the price cache from Azure SQL — a fresh snapshot means we
+  // can skip the multi-minute Retail Prices crawl entirely. Fall back to the
+  // API when the DB is absent, empty, or stale.
+  try {
+    const fresh = await hydrateCacheFromDb();
+    if (fresh) {
+      console.log('[asr-estimator] price cache hydrated from Azure SQL — skipping API crawl');
+      return;
+    }
+  } catch (e) {
+    console.error('[asr-estimator] hydrate error:', e.message);
+  }
   console.log('[asr-estimator] warming Azure Retail Prices cache...');
   warmCache().catch((e) => console.error('warm error', e));
 });

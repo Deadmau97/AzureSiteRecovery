@@ -1,6 +1,8 @@
 // Azure Retail Prices API client + in-memory cache.
 // Docs: https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices
 
+import { dbEnabled, savePriceSnapshot, loadPriceSnapshot } from './db.js';
+
 const BASE = 'https://prices.azure.com/api/retail/prices';
 const API_VERSION = '2023-01-01-preview';
 
@@ -167,6 +169,15 @@ export async function warmCache({ verbose = true } = {}) {
             `nat=${natGateway.length}, appSvc=${appServicePlan.length})`
         );
       }
+
+      // Persist the freshly warmed slot to Azure SQL (fire-and-forget) so
+      // restarts hydrate from the DB instead of re-crawling the Retail Prices
+      // API, and so other services can consume the same snapshot.
+      if (dbEnabled()) {
+        savePriceSnapshot(`prices:${currency}`, cache[currency])
+          .then(() => { if (verbose) console.log(`[prices] ${currency} snapshot persisted to SQL`); })
+          .catch((e) => console.error(`[prices] ${currency} snapshot persist failed:`, e.message));
+      }
     }
   } catch (err) {
     lastError = err;
@@ -178,6 +189,32 @@ export async function warmCache({ verbose = true } = {}) {
 
 function getRegional(items, armRegionName) {
   return items.filter((i) => i.armRegionName === armRegionName);
+}
+
+// Hydrate the in-memory cache from Azure SQL snapshots. Returns true when every
+// currency was restored from a snapshot younger than `maxAgeHours`, meaning the
+// caller can skip the (slow) Retail Prices crawl at boot.
+export async function hydrateCacheFromDb({ maxAgeHours = 24, verbose = true } = {}) {
+  if (!dbEnabled()) return false;
+  let allFresh = true;
+  for (const currency of CURRENCIES) {
+    try {
+      const snap = await loadPriceSnapshot(`prices:${currency}`);
+      if (!snap) { allFresh = false; continue; }
+      const slot = snap.payload;
+      slot.updatedAt = new Date(snap.fetchedAt);
+      cache[currency] = slot;
+      const ageH = (Date.now() - new Date(snap.fetchedAt).getTime()) / 3600000;
+      if (ageH > maxAgeHours) allFresh = false;
+      if (verbose) {
+        console.log(`[prices] ${currency} hydrated from SQL snapshot (${ageH.toFixed(1)}h old, vms=${slot.vms?.length || 0})`);
+      }
+    } catch (e) {
+      console.error(`[prices] hydrate ${currency} failed:`, e.message);
+      allFresh = false;
+    }
+  }
+  return allFresh;
 }
 
 // ---------- Public lookup helpers ----------

@@ -58,6 +58,8 @@
           <input type="number" id="discountPct" min="0" max="100" step="0.5" value="0" />
         </label>
         <button class="btn ghost" id="refreshPricesBtn" title="Re-warm Retail Prices cache">Refresh prices</button>
+        <button class="btn ghost" id="saveConfigBtn" title="Save this configuration to the database and get a share link">Save / Share</button>
+        <button class="btn ghost" id="openConfigBtn" title="Search saved configurations by FQDN">Open…</button>
         <button class="btn primary" id="estimateBtn" title="Calculate monthly cost and view the results page">
           Calculate &amp; review
         </button>
@@ -132,24 +134,16 @@
         </div>
         <div class="warnings" id="warningsBox" hidden></div>
 
-        <!-- Reservation / Hybrid Benefit scenario comparison — always shown
-             at the top of the results page so users see the cheapest option
-             before the per-service breakdown. -->
-        <div class="chart-card scenario-card">
-          <div class="scenario-head">
-            <h3>What-if: PAYG vs 3-Year RI vs RI + Hybrid Benefit</h3>
-            <p class="muted">
-              Recomputes the same inventory with three combinations of reservation and Azure
-              Hybrid Benefit applied to every VM, so you can see the cheapest option at a glance.
-              Storage / network items are unaffected by RI &amp; HB and contribute the same total
-              in every scenario.
-            </p>
+        <!-- All three charts on a single row. The scenario comparison stays the
+             first (leftmost) chart per the partner spec. -->
+        <div class="charts-row charts-row-3">
+          <div class="chart-card scenario-card">
+            <div class="scenario-head">
+              <h3>What-if: PAYG vs 3-Year RI vs RI + Hybrid Benefit</h3>
+            </div>
+            <canvas id="chartScenarios" height="220"></canvas>
+            <div id="scenarioSummary" class="scenario-summary"></div>
           </div>
-          <canvas id="chartScenarios" height="180"></canvas>
-          <div id="scenarioSummary" class="scenario-summary"></div>
-        </div>
-
-        <div class="charts-row">
           <div class="chart-card">
             <h3>Cost by service type</h3>
             <canvas id="chartByType" height="220"></canvas>
@@ -280,6 +274,44 @@
         <footer>
           <button class="btn ghost" id="defaultsResetBtn">Reset to factory</button>
           <button class="btn primary" id="defaultsSaveBtn">Save defaults</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- ================== Save / Open configuration modal ================== -->
+    <div class="modal-backdrop" id="configModal" hidden>
+      <div class="modal">
+        <header>
+          <h3 id="configModalTitle">Save configuration</h3>
+          <button class="icon-btn" id="configModalClose" aria-label="Close">×</button>
+        </header>
+        <div class="modal-body">
+          <!-- Save pane -->
+          <div id="configSavePane">
+            <p class="muted modal-subtitle">
+              Saves the current rows, region, currency and discount to the database.
+              You'll get a share link like <code>https://&lt;host&gt;/Xy3kP9aQz2</code> that
+              reopens this exact estimate.
+            </p>
+            <label class="field-stacked">
+              <span>Project FQDN / name</span>
+              <input type="text" id="configFqdn" placeholder="customer.contoso.com" />
+            </label>
+            <div id="configSaveResult" class="config-save-result" hidden></div>
+          </div>
+          <!-- Open pane -->
+          <div id="configOpenPane" hidden>
+            <p class="muted modal-subtitle">Search saved configurations by FQDN and click one to load it.</p>
+            <label class="field-stacked">
+              <span>FQDN contains…</span>
+              <input type="search" id="configSearch" placeholder="contoso" />
+            </label>
+            <div id="configSearchResults" class="config-search-results"></div>
+          </div>
+        </div>
+        <footer>
+          <button class="btn ghost" id="configModalCancel">Close</button>
+          <button class="btn primary" id="configSaveConfirm">Save &amp; get link</button>
         </footer>
       </div>
     </div>
