@@ -1282,14 +1282,21 @@ function buildSqlDbOptions(consumption, reservations) {
   return { vcore: vcoreList, dtu: dtuList };
 }
 
-// "SQL Managed Instance General Purpose - Compute Gen5" → tier + hardware.
+// "SQL Managed Instance General Purpose - Compute Gen5"          → hardware 'Gen5'
+// "SQL Managed Instance General Purpose - Premium Series Compute" → hardware 'Premium Series'
+// (the Premium-series hardware is the "Next-Gen" General Purpose that supports
+// additional memory, billed per GB/hour via 'Addl Memory' meters).
 function parseSqlMiProduct(productName = '') {
-  const m = (productName || '').match(/^SQL Managed Instance\s+(.*?)\s*(General Purpose|Business Critical)\s*-\s*Compute\s+(.+)$/i);
+  const m = (productName || '').match(/^SQL Managed Instance\s+(.*?)\s*(General Purpose|Business Critical)\s*-\s*(.+)$/i);
   if (!m) return null;
+  let hw = m[3];
+  if (!/\bcompute\b/i.test(hw)) return null; // '- Storage', '- LTR Backup Storage', …
+  hw = hw.replace(/\bcompute\b/gi, ' ').replace(/[-–]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!hw) return null;
   const prefix = (m[1] || '').trim();
   return {
     tier: prefix ? `${prefix} ${m[2]}` : m[2],
-    hardware: m[3].replace(/[-–]/g, ' ').replace(/\s+/g, ' ').trim(),
+    hardware: hw,
   };
 }
 
@@ -1304,6 +1311,19 @@ function buildSqlMiOptions(consumption, reservations) {
     const key = [parsed.tier, parsed.hardware].join('|');
     const cur = map.get(key);
     if (!cur || per < cur.perVcoreHour) map.set(key, { ...parsed, perVcoreHour: per, ri: {} });
+  }
+  // Attach the additional-memory rate (GB/hour) where the hardware supports it
+  // (Premium-series / Next-Gen). Meters: 'Addl Memory …' / 'Addl Mm …'.
+  for (const i of consumption) {
+    if (!/addl\s*m(emory|m)\b|additional memory/i.test(i.meterName || '')) continue;
+    if (/zone redundancy/i.test(`${i.skuName || ''} ${i.meterName || ''}`)) continue;
+    if (!/gb\s*\/?\s*hour/i.test(i.unitOfMeasure || '')) continue;
+    const parsed = parseSqlMiProduct(i.productName);
+    if (!parsed) continue;
+    const opt = map.get([parsed.tier, parsed.hardware].join('|'));
+    if (opt && (opt.memoryPerGbHour == null || i.retailPrice < opt.memoryPerGbHour)) {
+      opt.memoryPerGbHour = i.retailPrice;
+    }
   }
   for (const i of reservations) {
     if (isExcludedDbMeter(i)) continue;
@@ -1329,20 +1349,36 @@ function parseFlexProduct(productName = '') {
   return { tier: m[1], hardware: hardware || null };
 }
 
+// Flexible Server bills two ways depending on the tier:
+//  - Burstable: per-instance SKU meters (B1ms, B2s, …)         → kind 'instance'
+//  - General Purpose / Memory Optimized / Business Critical:
+//    per-vCore meters ('vCore', '2 vCore', …) per hardware series → kind 'vcore'
 function buildFlexOptions(consumption, reservations) {
-  const map = new Map(); // tier|sku → option
+  const instances = new Map(); // tier|sku → option
+  const vcores = new Map();    // tier|hardware → option
   for (const i of consumption) {
     if (isExcludedDbMeter(i)) continue;
     const parsed = parseFlexProduct(i.productName);
     if (!parsed) continue;
     if (!/hour/i.test(i.unitOfMeasure || '')) continue;
+    const per = perVcoreHourly(i);
+    if (per != null) {
+      if (!parsed.hardware) continue; // anonymous 'General Purpose Series Compute' oddity
+      const key = [parsed.tier, parsed.hardware].join('|');
+      const cur = vcores.get(key);
+      if (!cur || per < cur.perVcoreHour) {
+        vcores.set(key, { kind: 'vcore', tier: parsed.tier, hardware: parsed.hardware, perVcoreHour: per, ri: {} });
+      }
+      continue;
+    }
     const sku = (i.meterName || '').trim();
     if (!sku || /vcore|storage|iops|backup/i.test(sku)) continue;
     const vm = sku.match(/^[A-Z]+?(\d+)/i);
     const key = [parsed.tier, sku].join('|');
-    const cur = map.get(key);
+    const cur = instances.get(key);
     if (!cur || i.retailPrice < cur.hourly) {
-      map.set(key, {
+      instances.set(key, {
+        kind: 'instance',
         tier: parsed.tier,
         hardware: parsed.hardware,
         sku,
@@ -1356,14 +1392,73 @@ function buildFlexOptions(consumption, reservations) {
     if (isExcludedDbMeter(i)) continue;
     const parsed = parseFlexProduct(i.productName);
     if (!parsed) continue;
-    const sku = (i.meterName || i.skuName || '').trim();
-    const opt = map.get([parsed.tier, sku].join('|'));
-    if (!opt) continue;
     const term = /3/.test(i.reservationTerm || '') ? '3y' : '1y';
+    const n = skuVcoreCount(i.skuName) ?? skuVcoreCount(i.meterName);
+    if (n != null && parsed.hardware) {
+      // Per-vCore reservation → attach to the matching series option.
+      const opt = vcores.get([parsed.tier, parsed.hardware].join('|'));
+      if (opt) {
+        const per = riEffectiveHourly(i) / n;
+        if (opt.ri[term] == null || per < opt.ri[term]) opt.ri[term] = per;
+      }
+      continue;
+    }
+    const sku = (i.meterName || i.skuName || '').trim();
+    const opt = instances.get([parsed.tier, sku].join('|'));
+    if (!opt) continue;
     const per = riEffectiveHourly(i);
     if (opt.ri[term] == null || per < opt.ri[term]) opt.ri[term] = per;
   }
-  return [...map.values()].sort((a, b) => a.hourly - b.hourly);
+  const instList = [...instances.values()].sort((a, b) => a.hourly - b.hourly);
+  const vcoreList = [...vcores.values()].sort((a, b) => a.perVcoreHour - b.perVcoreHour);
+  return [...vcoreList, ...instList];
+}
+
+// Storage types offered for Flexible Server (Premium SSD / SSD v2 / Ultra Disk),
+// from '… Flexible Server Storage' data-stored meters. ZRS variants belong to
+// the HA option, PMD/accelerated-logs meters are not capacity meters.
+function buildFlexStorageTypes(consumption) {
+  const map = new Map();
+  for (const i of consumption) {
+    if (!/flexible server storage/i.test(i.productName || '')) continue;
+    if (!/data stored/i.test(i.meterName || '')) continue;
+    if (!/gi?b\s*\/?\s*month/i.test(i.unitOfMeasure || '')) continue;
+    const sku = (i.skuName || '').trim();
+    if (!sku || /zrs|pmd|accelerated|backup/i.test(sku)) continue;
+    let label = 'Premium SSD';
+    if (/ssd\s*v2/i.test(sku)) label = 'Premium SSD v2';
+    else if (/ultra/i.test(sku)) label = 'Ultra Disk';
+    const cur = map.get(sku);
+    if (!cur || i.retailPrice < cur.perGiB) map.set(sku, { value: sku, label, perGiB: i.retailPrice });
+  }
+  return [...map.values()].sort((a, b) => a.perGiB - b.perGiB);
+}
+
+// Backup storage redundancy tiers (long-term retention / backup meters).
+// SQL Database & Managed Instance publish dedicated LTR meters
+// ('LTR Backup LRS/ZRS/RA-GRS/RA-GZRS Data Stored'); MySQL/PostgreSQL Flexible
+// Server bill extra backup via 'Backup Storage LRS/ZRS Data Stored'.
+const BACKUP_RED_TOKEN = /\b(RA-GZRS|RA-GRS|GZRS|GRS|ZRS|LRS)\b/i;
+const BACKUP_RED_ORDER = ['LRS', 'ZRS', 'GRS', 'RA-GRS', 'GZRS', 'RA-GZRS'];
+
+function buildDbBackupOptions(consumption, serviceKey) {
+  const ltrOnly = serviceKey === 'sqldb' || serviceKey === 'sqlmi';
+  const map = new Map();
+  for (const i of consumption) {
+    if (!/gi?b\s*\/?\s*month/i.test(i.unitOfMeasure || '')) continue;
+    if (/cosmos|single server|horizondb/i.test(i.productName || '')) continue;
+    const name = `${i.productName || ''} ${i.skuName || ''} ${i.meterName || ''}`;
+    const isLtr = /\bltr\b|long[- ]term/i.test(name);
+    if (ltrOnly ? !isLtr : !/backup/i.test(name)) continue;
+    const m = `${i.skuName || ''} ${i.meterName || ''}`.match(BACKUP_RED_TOKEN);
+    if (!m) continue;
+    const red = m[1].toUpperCase();
+    const cur = map.get(red);
+    if (!cur || i.retailPrice < cur.perGiB) map.set(red, { redundancy: red, perGiB: i.retailPrice });
+  }
+  return [...map.values()].sort(
+    (a, b) => BACKUP_RED_ORDER.indexOf(a.redundancy) - BACKUP_RED_ORDER.indexOf(b.redundancy)
+  );
 }
 
 /**
@@ -1373,9 +1468,15 @@ function buildFlexOptions(consumption, reservations) {
 export function listDbConfigOptions(currency, armRegionName, serviceKey) {
   const cons = getRegional(cache[currency]?.[DB_SLOTS[serviceKey]] || [], armRegionName);
   const ri = getRegional(cache[currency]?.[DB_RI_SLOTS[serviceKey]] || [], armRegionName);
-  if (serviceKey === 'sqldb') return { service: 'sqldb', ...buildSqlDbOptions(cons, ri) };
-  if (serviceKey === 'sqlmi') return { service: 'sqlmi', options: buildSqlMiOptions(cons, ri) };
-  return { service: serviceKey, options: buildFlexOptions(cons, ri) };
+  const backup = buildDbBackupOptions(cons, serviceKey);
+  if (serviceKey === 'sqldb') return { service: 'sqldb', ...buildSqlDbOptions(cons, ri), backup };
+  if (serviceKey === 'sqlmi') return { service: 'sqlmi', options: buildSqlMiOptions(cons, ri), backup };
+  return {
+    service: serviceKey,
+    options: buildFlexOptions(cons, ri),
+    storageTypes: buildFlexStorageTypes(cons),
+    backup,
+  };
 }
 
 /**
@@ -1426,30 +1527,52 @@ export function resolveDbCompute(currency, armRegionName, serviceKey, cfg) {
     const parts = serviceKey === 'sqldb'
       ? [cfg.deployment === 'Elastic Pool' ? 'Elastic pool' : 'Single database', hit.tier, computeTier, hit.hardware]
       : [hit.tier, hit.hardware];
+    // Next-Gen / Premium-series MI hardware supports extra memory (per GB/hour, PAYG).
+    let memory = null;
+    const memGB = Math.max(0, Number(cfg.memoryGB) || 0);
+    if (serviceKey === 'sqlmi' && memGB > 0 && hit.memoryPerGbHour != null) {
+      memory = {
+        monthly: hit.memoryPerGbHour * memGB * HOURS_PER_MONTH,
+        detail: `${memGB} GB additional memory — PAYG`,
+      };
+    }
     return {
       monthly: rate * vcores * HOURS_PER_MONTH,
       billing,
       detail: `${parts.join(' · ')} · ${vcores} vCore — ${note}`,
+      memory,
     };
   }
 
-  // MySQL / PostgreSQL Flexible Server: per-instance hourly SKU.
-  const hit = o.options.find((x) => x.tier === cfg.tier && x.sku === cfg.sku);
+  // MySQL / PostgreSQL Flexible Server: per-vCore series (GP / Memory Optimized /
+  // Business Critical) or per-instance hourly SKU (Burstable).
+  const pool = o.options || [];
+  const vcorePool = pool.filter((x) => x.kind === 'vcore' && x.tier === cfg.tier);
+  const instPool = pool.filter((x) => x.kind !== 'vcore' && x.tier === cfg.tier);
+  let hit = null;
+  if (cfg.hardware) hit = vcorePool.find((x) => x.hardware === cfg.hardware) || null;
+  if (!hit && cfg.sku) hit = instPool.find((x) => x.sku === cfg.sku) || null;
+  if (!hit) hit = vcorePool[0] || instPool[0] || null;
   if (!hit) return null;
-  let rate = hit.hourly;
+  const perVcore = hit.kind === 'vcore';
+  const vcores = perVcore ? Math.max(1, Number(cfg.vcores) || 1) : null;
+  let rate = perVcore ? hit.perVcoreHour * vcores : hit.hourly;
   let billing = 'payg';
   let note = 'PAYG';
   if (term && hit.ri && hit.ri[term] != null) {
-    rate = hit.ri[term];
+    rate = perVcore ? hit.ri[term] * vcores : hit.ri[term];
     billing = 'reservation';
     note = termLabel;
   } else if (term) {
     note = 'PAYG (no RI price published)';
   }
+  const what = perVcore
+    ? `${hit.tier} · ${hit.hardware} series · ${vcores} vCore`
+    : `${hit.tier} · ${hit.sku}${hit.vcores ? ` (${hit.vcores} vCore)` : ''}`;
   return {
     monthly: rate * HOURS_PER_MONTH,
     billing,
-    detail: `${hit.tier} · ${hit.sku}${hit.vcores ? ` (${hit.vcores} vCore)` : ''} — ${note}`,
+    detail: `${what} — ${note}`,
   };
 }
 
@@ -1465,6 +1588,22 @@ export function resolveDbStorage(currency, armRegionName, serviceKey, cfg) {
     return { monthly: 0, perGiB: 0, detail: 'Included in the DTU tier', included: true };
   }
   if (gib === 0) return { monthly: 0, perGiB: 0, detail: null, included: false };
+  const regional = getRegional(cache[currency]?.[DB_SLOTS[serviceKey]] || [], armRegionName);
+  // Flexible Server: price by the selected storage type (Premium SSD / SSD v2 / Ultra).
+  if (serviceKey === 'mysql' || serviceKey === 'postgresql') {
+    const types = buildFlexStorageTypes(regional);
+    if (types.length === 0) return null;
+    const hit =
+      types.find((t) => t.value === cfg.storageType) ||
+      types.find((t) => /^storage$/i.test(t.value)) ||
+      types[0];
+    return {
+      monthly: hit.perGiB * gib,
+      perGiB: hit.perGiB,
+      detail: `${gib} GiB · ${hit.label}`,
+      included: false,
+    };
+  }
   let billable = gib;
   let note = `${gib} GiB`;
   if (serviceKey === 'sqlmi') {
@@ -1472,7 +1611,7 @@ export function resolveDbStorage(currency, armRegionName, serviceKey, cfg) {
     billable = Math.max(0, gib - included);
     note = `${gib} GiB (first ${included} GiB included)`;
   }
-  const items = getRegional(cache[currency]?.[DB_SLOTS[serviceKey]] || [], armRegionName).filter(
+  const items = regional.filter(
     (i) => isDbStorageMeter(i) && !isExcludedDbMeter(i)
   );
   if (items.length === 0) return null;
@@ -1483,5 +1622,26 @@ export function resolveDbStorage(currency, armRegionName, serviceKey, cfg) {
   pool.sort((a, b) => a.retailPrice - b.retailPrice);
   const hit = pool[0];
   return { monthly: hit.retailPrice * billable, perGiB: hit.retailPrice, detail: note, included: false };
+}
+
+/**
+ * Monthly long-term-retention / extra backup storage cost for a DB row.
+ * cfg: { ltrGiB, backupRedundancy: 'LRS'|'ZRS'|'GRS'|'RA-GRS'|'RA-GZRS' }
+ * Returns { monthly, perGiB, redundancy, detail } or null (no data / 0 GiB).
+ */
+export function resolveDbBackup(currency, armRegionName, serviceKey, cfg) {
+  const gib = Math.max(0, Number(cfg.ltrGiB) || 0);
+  if (gib === 0) return null;
+  const regional = getRegional(cache[currency]?.[DB_SLOTS[serviceKey]] || [], armRegionName);
+  const opts = buildDbBackupOptions(regional, serviceKey);
+  if (opts.length === 0) return null;
+  const want = String(cfg.backupRedundancy || 'LRS').toUpperCase();
+  const hit = opts.find((o) => o.redundancy === want) || opts[0];
+  return {
+    monthly: hit.perGiB * gib,
+    perGiB: hit.perGiB,
+    redundancy: hit.redundancy,
+    detail: `${gib} GiB · ${hit.redundancy}`,
+  };
 }
 

@@ -737,6 +737,9 @@ function makeRow(type, prefill = {}) {
         id, type,
         name: prefill.name || `${names[type]}-${countRows(type) + 1}`,
         reservation: prefill.reservation || 'payg',
+        // Long-term retention / extra backup storage (all DB services).
+        ltrGiB: prefill.ltrGiB ?? 0,
+        backupRedundancy: prefill.backupRedundancy || 'LRS',
         // Legacy saved configs picked a flat compute-plan meter; keep the key so
         // old share links still price until the user touches a dimension.
         computeKey: prefill.computeKey || null,
@@ -760,13 +763,18 @@ function makeRow(type, prefill = {}) {
           tier: prefill.tier || 'General Purpose',
           hardware: prefill.hardware || 'Gen5',
           vcores: prefill.vcores ?? 4,
+          memoryGB: prefill.memoryGB ?? 0,
           storageGiB: prefill.storageGiB ?? 256,
         };
       }
       return {
         ...base,
         tier: prefill.tier || 'General Purpose',
+        hardware: prefill.hardware || null,
+        vcores: prefill.vcores ?? 2,
         sku: prefill.sku || null,
+        storageType: prefill.storageType || null,
+        haEnabled: !!prefill.haEnabled,
         storageGiB: prefill.storageGiB ?? 64,
       };
     }
@@ -1348,9 +1356,14 @@ function renderDbRow(row) {
     computeTier: card.querySelector('.db-computetier'),
     hardware: card.querySelector('.db-hardware'),
     vcores: card.querySelector('.db-vcores'),
+    memory: card.querySelector('.db-memory'),
     sku: card.querySelector('.db-sku'),
     reservation: card.querySelector('.db-reservation'),
+    storageType: card.querySelector('.db-storagetype'),
     storage: card.querySelector('.db-storage'),
+    ha: card.querySelector('.db-ha'),
+    ltr: card.querySelector('.db-ltr'),
+    backupRed: card.querySelector('.db-backupred'),
   };
   const show = (name, on) => {
     const w = card.querySelector(`.db-${name}-wrap`);
@@ -1360,6 +1373,9 @@ function renderDbRow(row) {
   el.vcores.value = row.vcores ?? 2;
   el.storage.value = row.storageGiB ?? 0;
   el.reservation.value = row.reservation || 'payg';
+  el.memory.value = row.memoryGB ?? 0;
+  el.ltr.value = row.ltrGiB ?? 0;
+  el.ha.checked = !!row.haEnabled;
 
   let opts = null; // structured dimensions fetched from /api/azure/db-options
 
@@ -1407,8 +1423,7 @@ function renderDbRow(row) {
         show('reservation', false);
         show('storage', false); // included in the DTU tier
         row.reservation = 'payg';
-      } else {
-        // vCore model: tier → compute tier → hardware, priced per vCore-hour.
+      } else {        // vCore model: tier → compute tier → hardware, priced per vCore-hour.
         const pool = (opts.vcore || []).filter((o) => depOk(o.deployment));
         row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
         const p2 = pool.filter((o) => o.tier === row.tier);
@@ -1427,12 +1442,18 @@ function renderDbRow(row) {
         show('reservation', riOk);
         if (!riOk) row.reservation = 'payg';
       }
+      show('memory', false);
+      show('storagetype', false);
+      show('ha', false);
     } else if (svc === 'sqlmi') {
       // Managed Instance is vCore-only: service tier + hardware + vCores.
+      // Premium-series (Next-Gen) hardware also supports additional memory.
       show('deployment', false);
       show('purchase', false);
       show('sku', false);
       show('computetier', false);
+      show('storagetype', false);
+      show('ha', false);
       const pool = opts.options || [];
       row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
       const p2 = pool.filter((o) => o.tier === row.tier);
@@ -1442,36 +1463,85 @@ function renderDbRow(row) {
       show('hardware', true);
       show('vcores', true);
       show('storage', true);
+      const memOk = !!selected && selected.memoryPerGbHour != null;
+      show('memory', memOk);
+      if (!memOk) row.memoryGB = 0;
+      else el.memory.value = row.memoryGB ?? 0;
       const riOk = hasRi(selected);
       show('reservation', riOk);
       if (!riOk) row.reservation = 'payg';
     } else {
-      // MySQL / PostgreSQL Flexible Server: compute tier + compute size (SKU),
-      // priced per instance-hour.
+      // MySQL / PostgreSQL Flexible Server. Burstable bills per instance SKU;
+      // General Purpose / Memory Optimized / Business Critical bill per vCore
+      // on a hardware series (pick series + vCores, like the Azure calculator).
       show('deployment', false);
       show('purchase', false);
       show('computetier', false);
-      show('hardware', false);
-      show('vcores', false);
+      show('memory', false);
       const pool = opts.options || [];
       row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
-      const skus = pool.filter((o) => o.tier === row.tier);
-      row.sku = fillSelect(
-        el.sku,
-        skus.map((o) => ({
-          value: o.sku,
-          label: `${o.sku}${o.vcores ? ` (${o.vcores} vCore)` : ''} — ${fmt(o.hourly * 730)}/mo`,
-        })),
-        row.sku
-      );
-      const selected = skus.find((o) => o.sku === row.sku) || null;
+      const tierPool = pool.filter((o) => o.tier === row.tier);
+      const vcorePool = tierPool.filter((o) => o.kind === 'vcore');
+      let selected = null;
+      if (vcorePool.length > 0) {
+        row.sku = null;
+        row.hardware = fillSelect(
+          el.hardware,
+          vcorePool.map((o) => ({
+            value: o.hardware,
+            label: `${o.hardware} series — ${fmt(o.perVcoreHour * 730)}/vCore/mo`,
+          })),
+          row.hardware
+        );
+        selected = vcorePool.find((o) => o.hardware === row.hardware) || null;
+        show('hardware', true);
+        show('vcores', true);
+        show('sku', false);
+      } else {
+        row.hardware = null;
+        row.sku = fillSelect(
+          el.sku,
+          tierPool.map((o) => ({
+            value: o.sku,
+            label: `${o.sku}${o.vcores ? ` (${o.vcores} vCore)` : ''} — ${fmt(o.hourly * 730)}/mo`,
+          })),
+          row.sku
+        );
+        selected = tierPool.find((o) => o.sku === row.sku) || null;
+        show('hardware', false);
+        show('vcores', false);
+        show('sku', true);
+      }
       show('tier', true);
-      show('sku', true);
       show('storage', true);
+      // Storage type (Premium SSD / Premium SSD v2 / Ultra Disk) when published.
+      const stypes = opts.storageTypes || [];
+      if (stypes.length > 0) {
+        row.storageType = fillSelect(
+          el.storageType,
+          stypes.map((t) => ({ value: t.value, label: `${t.label} — ${fmt(t.perGiB)}/GiB` })),
+          row.storageType
+        );
+      }
+      show('storagetype', stypes.length > 0);
+      show('ha', true);
+      el.ha.checked = !!row.haEnabled;
       const riOk = hasRi(selected);
       show('reservation', riOk);
       if (!riOk) row.reservation = 'payg';
     }
+    // Long-term retention / backup storage redundancy (all DB services).
+    const bk = opts.backup || [];
+    if (bk.length > 0) {
+      row.backupRedundancy = fillSelect(
+        el.backupRed,
+        bk.map((b) => ({ value: b.redundancy, label: `${b.redundancy} — ${fmt(b.perGiB)}/GiB` })),
+        row.backupRedundancy
+      );
+      el.ltr.value = row.ltrGiB ?? 0;
+    }
+    show('ltr', bk.length > 0);
+    show('backupred', bk.length > 0);
     el.reservation.value = row.reservation || 'payg';
   }
 
@@ -1490,7 +1560,12 @@ function renderDbRow(row) {
   }));
   el.reservation.addEventListener('change', () => { touched(); row.reservation = el.reservation.value; schedulePreview(); });
   el.vcores.addEventListener('change', () => { touched(); row.vcores = Math.max(1, +el.vcores.value || 1); schedulePreview(); });
+  el.memory.addEventListener('change', () => { row.memoryGB = Math.max(0, +el.memory.value || 0); schedulePreview(); });
+  el.storageType.addEventListener('change', () => { row.storageType = el.storageType.value; schedulePreview(); });
   el.storage.addEventListener('change', () => { row.storageGiB = +el.storage.value || 0; schedulePreview(); });
+  el.ha.addEventListener('change', () => { row.haEnabled = el.ha.checked; schedulePreview(); });
+  el.ltr.addEventListener('change', () => { row.ltrGiB = Math.max(0, +el.ltr.value || 0); schedulePreview(); });
+  el.backupRed.addEventListener('change', () => { row.backupRedundancy = el.backupRed.value; schedulePreview(); });
 
   loadDbOptions(svc).then((o) => { opts = o; rebuild(); schedulePreview(); });
   return card;

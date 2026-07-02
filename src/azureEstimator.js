@@ -21,6 +21,7 @@ import {
   findDbStoragePricePerGiBMonth,
   resolveDbCompute,
   resolveDbStorage,
+  resolveDbBackup,
   findSqlVmLicensePerVcpuHour,
   HOURS_PER_MONTH,
 } from './prices.js';
@@ -396,6 +397,7 @@ export function estimateAzure(input) {
         }
 
         const comp = resolveDbCompute(currency, armRegionName, row.type, row);
+        const isFlex = row.type === 'mysql' || row.type === 'postgresql';
         if (comp) {
           monthly += comp.monthly;
           lineItems.push({
@@ -404,6 +406,26 @@ export function estimateAzure(input) {
             amount: comp.monthly,
             billing: comp.billing,
           });
+          // SQL MI Next-Gen / Premium-series: additional memory (per GB/hour, PAYG).
+          if (comp.memory) {
+            monthly += comp.memory.monthly;
+            lineItems.push({
+              category: `${label} additional memory`,
+              detail: comp.memory.detail,
+              amount: comp.memory.monthly,
+              billing: 'payg',
+            });
+          }
+          // Flexible Server HA: a standby replica of the same compute size.
+          if (isFlex && row.haEnabled) {
+            monthly += comp.monthly;
+            lineItems.push({
+              category: `${label} high availability`,
+              detail: 'Standby replica (same compute size)',
+              amount: comp.monthly,
+              billing: comp.billing,
+            });
+          }
         } else {
           warnings.push(`No ${label} price for the selected configuration in ${armRegionName}/${currency}.`);
         }
@@ -416,8 +438,31 @@ export function estimateAzure(input) {
             amount: st.monthly,
             billing: 'payg',
           });
+          // The HA standby provisions the same storage as the primary.
+          if (isFlex && row.haEnabled && st.monthly > 0) {
+            monthly += st.monthly;
+            lineItems.push({
+              category: `${label} HA standby storage`,
+              detail: st.detail,
+              amount: st.monthly,
+              billing: 'payg',
+            });
+          }
         } else if (st === null && Math.max(0, Number(row.storageGiB) || 0) > 0) {
           warnings.push(`No storage price for ${label} in ${armRegionName}/${currency}.`);
+        }
+        // Long-term retention / extra backup storage (LRS/ZRS/GRS…), always PAYG.
+        const bk = resolveDbBackup(currency, armRegionName, row.type, row);
+        if (bk) {
+          monthly += bk.monthly;
+          lineItems.push({
+            category: `${label} backup (LTR)`,
+            detail: bk.detail,
+            amount: bk.monthly,
+            billing: 'payg',
+          });
+        } else if (Math.max(0, Number(row.ltrGiB) || 0) > 0) {
+          warnings.push(`No backup storage price for ${label} in ${armRegionName}/${currency}.`);
         }
         break;
       }

@@ -682,6 +682,9 @@
             <label class="field-flat db-vcores-wrap"><span>Instance (vCores)</span>
               <input type="number" class="db-vcores" min="1" step="1" value="2" />
             </label>
+            <label class="field-flat db-memory-wrap" hidden><span>Additional memory (GB)</span>
+              <input type="number" class="db-memory" min="0" step="1" value="0" />
+            </label>
             <label class="field-flat db-sku-wrap"><span>Compute size</span>
               <select class="db-sku"></select>
             </label>
@@ -692,8 +695,21 @@
                 <option value="3y">3 years reserved</option>
               </select>
             </label>
+            <label class="field-flat db-storagetype-wrap" hidden><span>Storage type</span>
+              <select class="db-storagetype"></select>
+            </label>
             <label class="field-flat db-storage-wrap"><span>Storage (GiB)</span>
               <input type="number" class="db-storage" min="0" value="32" />
+            </label>
+            <div class="field-flat toggle-row db-ha-wrap" hidden>
+              <span>High availability</span>
+              <label class="switch"><input type="checkbox" class="db-ha" /><span class="slider"></span></label>
+            </div>
+            <label class="field-flat db-ltr-wrap" hidden><span>LTR backup (GiB)</span>
+              <input type="number" class="db-ltr" min="0" value="0" />
+            </label>
+            <label class="field-flat db-backupred-wrap" hidden><span>Backup redundancy</span>
+              <select class="db-backupred"></select>
             </label>
           </div>
         </div>
