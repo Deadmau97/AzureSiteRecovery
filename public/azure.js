@@ -117,6 +117,7 @@ const state = {
   publicIpSkus: [],
   // Managed database compute-plan lists, keyed by `${service}:${region}:${currency}`.
   dbSkus: {},
+  dbOptions: {},
   defaults: loadDefaults(),
   lastEstimate: null,
   collapsedAll: false,
@@ -357,6 +358,7 @@ async function loadRegions() {
   sel.addEventListener('change', async () => {
     state.region = sel.value;
     state.dbSkus = {};
+    state.dbOptions = {};
     await loadServiceCatalogs();
     renderRows();
     schedulePreview();
@@ -378,6 +380,7 @@ async function loadCurrencies() {
   sel.addEventListener('change', async () => {
     state.currency = sel.value;
     state.dbSkus = {};
+    state.dbOptions = {};
     await loadServiceCatalogs();
     renderRows();
     pollStatus();
@@ -730,12 +733,41 @@ function makeRow(type, prefill = {}) {
     case 'mysql':
     case 'postgresql': {
       const names = { sqldb: 'sqldb', sqlmi: 'sqlmi', mysql: 'mysql', postgresql: 'pg' };
-      return {
+      const base = {
         id, type,
         name: prefill.name || `${names[type]}-${countRows(type) + 1}`,
+        reservation: prefill.reservation || 'payg',
+        // Legacy saved configs picked a flat compute-plan meter; keep the key so
+        // old share links still price until the user touches a dimension.
         computeKey: prefill.computeKey || null,
-        storageGiB: prefill.storageGiB ?? 32,
-        search: prefill.search || '',
+      };
+      if (type === 'sqldb') {
+        return {
+          ...base,
+          deployment: prefill.deployment || 'Single',
+          purchaseModel: prefill.purchaseModel || 'vCore',
+          tier: prefill.tier || 'General Purpose',
+          computeTier: prefill.computeTier || 'Provisioned',
+          hardware: prefill.hardware || 'Gen5',
+          vcores: prefill.vcores ?? 2,
+          dtuSku: prefill.dtuSku || null,
+          storageGiB: prefill.storageGiB ?? 32,
+        };
+      }
+      if (type === 'sqlmi') {
+        return {
+          ...base,
+          tier: prefill.tier || 'General Purpose',
+          hardware: prefill.hardware || 'Gen5',
+          vcores: prefill.vcores ?? 4,
+          storageGiB: prefill.storageGiB ?? 256,
+        };
+      }
+      return {
+        ...base,
+        tier: prefill.tier || 'General Purpose',
+        sku: prefill.sku || null,
+        storageGiB: prefill.storageGiB ?? 64,
       };
     }
     default:
@@ -1292,6 +1324,9 @@ function populateNatSkuSelect(sel, current) {
 }
 
 // ---------- Managed database row ----------
+// Structured, Azure-calculator-style configuration: each dropdown narrows the
+// next one, mirroring how the service is actually billed (type → purchase model
+// → service tier → compute tier → hardware → vCores / DTU size → reservation).
 function renderDbRow(row) {
   const card = $('#dbRowTpl').content.firstElementChild.cloneNode(true);
   commonWire(card, row);
@@ -1305,67 +1340,177 @@ function renderDbRow(row) {
   const iconEl = card.querySelector('.row-icon');
   if (iconEl && icons[row.type]) iconEl.src = icons[row.type];
 
-  const computeSel = card.querySelector('.db-compute');
-  const search = card.querySelector('.db-search');
-  const storage = card.querySelector('.db-storage');
-  storage.value = row.storageGiB;
-  search.value = row.search || '';
-
-  // Fill the compute dropdown from the cached SKU list, filtered by the search box.
-  let allSkus = [];
-  const fill = () => {
-    const q = (row.search || '').trim().toLowerCase();
-    const list = q ? allSkus.filter((s) => s.key.toLowerCase().includes(q)) : allSkus;
-    computeSel.innerHTML = '';
-    if (list.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = allSkus.length === 0 ? 'No plans loaded (refresh prices)' : 'No plan matches';
-      computeSel.appendChild(opt);
-      return;
-    }
-    for (const s of list) {
-      const opt = document.createElement('option');
-      opt.value = s.key;
-      opt.textContent = `${s.key} — ${fmt(s.monthly)}/mo`;
-      computeSel.appendChild(opt);
-    }
-    if (row.computeKey && list.some((s) => s.key === row.computeKey)) {
-      computeSel.value = row.computeKey;
-    } else {
-      computeSel.value = list[0].key;
-      row.computeKey = list[0].key;
-    }
+  const svc = row.type;
+  const el = {
+    deployment: card.querySelector('.db-deployment'),
+    purchase: card.querySelector('.db-purchase'),
+    tier: card.querySelector('.db-tier'),
+    computeTier: card.querySelector('.db-computetier'),
+    hardware: card.querySelector('.db-hardware'),
+    vcores: card.querySelector('.db-vcores'),
+    sku: card.querySelector('.db-sku'),
+    reservation: card.querySelector('.db-reservation'),
+    storage: card.querySelector('.db-storage'),
+  };
+  const show = (name, on) => {
+    const w = card.querySelector(`.db-${name}-wrap`);
+    if (w) w.hidden = !on;
   };
 
-  loadDbSkus(row.type).then((list) => { allSkus = list; fill(); schedulePreview(); });
+  el.vcores.value = row.vcores ?? 2;
+  el.storage.value = row.storageGiB ?? 0;
+  el.reservation.value = row.reservation || 'payg';
 
-  computeSel.addEventListener('change', () => { row.computeKey = computeSel.value || null; schedulePreview(); });
-  storage.addEventListener('change', () => { row.storageGiB = +storage.value || 0; schedulePreview(); });
-  let searchTimer = null;
-  search.addEventListener('input', () => {
-    row.search = search.value;
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(fill, 150);
-  });
+  let opts = null; // structured dimensions fetched from /api/azure/db-options
+
+  const uniq = (arr) => [...new Set(arr)];
+  const fillSelect = (sel, values, current) => {
+    sel.innerHTML = '';
+    for (const v of values) {
+      const o = document.createElement('option');
+      o.value = v.value;
+      o.textContent = v.label;
+      sel.appendChild(o);
+    }
+    if (values.some((v) => v.value === current)) sel.value = current;
+    else if (values.length > 0) sel.value = values[0].value;
+    return sel.value || null;
+  };
+  const depOk = (optionDep) =>
+    optionDep === 'both' || (optionDep === 'elastic') === (row.deployment === 'Elastic Pool');
+  const hasRi = (o) => !!o && (o.ri?.['1y'] != null || o.ri?.['3y'] != null);
+
+  // Rebuild every dependent dropdown from the current selection.
+  function rebuild() {
+    if (!opts) return;
+
+    if (svc === 'sqldb') {
+      show('deployment', true);
+      show('purchase', true);
+      el.deployment.value = row.deployment;
+      el.purchase.value = row.purchaseModel;
+      if (row.purchaseModel === 'DTU') {
+        // DTU tiers bundle compute + storage into one per-day meter (S0…P15, eDTU pools).
+        const pool = (opts.dtu || []).filter((o) => depOk(o.deployment));
+        row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
+        const skus = pool.filter((o) => o.tier === row.tier);
+        row.dtuSku = fillSelect(
+          el.sku,
+          skus.map((o) => ({ value: o.sku, label: `${o.sku} — ${fmt(o.monthly)}/mo` })),
+          row.dtuSku
+        );
+        show('tier', true);
+        show('sku', true);
+        show('computetier', false);
+        show('hardware', false);
+        show('vcores', false);
+        show('reservation', false);
+        show('storage', false); // included in the DTU tier
+        row.reservation = 'payg';
+      } else {
+        // vCore model: tier → compute tier → hardware, priced per vCore-hour.
+        const pool = (opts.vcore || []).filter((o) => depOk(o.deployment));
+        row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
+        const p2 = pool.filter((o) => o.tier === row.tier);
+        const cts = uniq(p2.map((o) => o.computeTier));
+        row.computeTier = fillSelect(el.computeTier, cts.map((t) => ({ value: t, label: t })), row.computeTier);
+        const p3 = p2.filter((o) => o.computeTier === row.computeTier);
+        row.hardware = fillSelect(el.hardware, uniq(p3.map((o) => o.hardware)).map((h) => ({ value: h, label: h })), row.hardware);
+        const selected = p3.find((o) => o.hardware === row.hardware) || null;
+        show('tier', true);
+        show('computetier', cts.length > 1);
+        show('hardware', true);
+        show('vcores', true);
+        show('sku', false);
+        show('storage', true);
+        const riOk = row.computeTier === 'Provisioned' && hasRi(selected);
+        show('reservation', riOk);
+        if (!riOk) row.reservation = 'payg';
+      }
+    } else if (svc === 'sqlmi') {
+      // Managed Instance is vCore-only: service tier + hardware + vCores.
+      show('deployment', false);
+      show('purchase', false);
+      show('sku', false);
+      show('computetier', false);
+      const pool = opts.options || [];
+      row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
+      const p2 = pool.filter((o) => o.tier === row.tier);
+      row.hardware = fillSelect(el.hardware, uniq(p2.map((o) => o.hardware)).map((h) => ({ value: h, label: h })), row.hardware);
+      const selected = p2.find((o) => o.hardware === row.hardware) || null;
+      show('tier', true);
+      show('hardware', true);
+      show('vcores', true);
+      show('storage', true);
+      const riOk = hasRi(selected);
+      show('reservation', riOk);
+      if (!riOk) row.reservation = 'payg';
+    } else {
+      // MySQL / PostgreSQL Flexible Server: compute tier + compute size (SKU),
+      // priced per instance-hour.
+      show('deployment', false);
+      show('purchase', false);
+      show('computetier', false);
+      show('hardware', false);
+      show('vcores', false);
+      const pool = opts.options || [];
+      row.tier = fillSelect(el.tier, uniq(pool.map((o) => o.tier)).map((t) => ({ value: t, label: t })), row.tier);
+      const skus = pool.filter((o) => o.tier === row.tier);
+      row.sku = fillSelect(
+        el.sku,
+        skus.map((o) => ({
+          value: o.sku,
+          label: `${o.sku}${o.vcores ? ` (${o.vcores} vCore)` : ''} — ${fmt(o.hourly * 730)}/mo`,
+        })),
+        row.sku
+      );
+      const selected = skus.find((o) => o.sku === row.sku) || null;
+      show('tier', true);
+      show('sku', true);
+      show('storage', true);
+      const riOk = hasRi(selected);
+      show('reservation', riOk);
+      if (!riOk) row.reservation = 'payg';
+    }
+    el.reservation.value = row.reservation || 'payg';
+  }
+
+  // Any interaction migrates the row off the legacy flat compute-plan key.
+  const touched = () => { row.computeKey = null; };
+  const onChange = (fn) => () => { touched(); fn(); rebuild(); schedulePreview(); };
+
+  el.deployment.addEventListener('change', onChange(() => { row.deployment = el.deployment.value; }));
+  el.purchase.addEventListener('change', onChange(() => { row.purchaseModel = el.purchase.value; }));
+  el.tier.addEventListener('change', onChange(() => { row.tier = el.tier.value; }));
+  el.computeTier.addEventListener('change', onChange(() => { row.computeTier = el.computeTier.value; }));
+  el.hardware.addEventListener('change', onChange(() => { row.hardware = el.hardware.value; }));
+  el.sku.addEventListener('change', onChange(() => {
+    if (svc === 'sqldb') row.dtuSku = el.sku.value;
+    else row.sku = el.sku.value;
+  }));
+  el.reservation.addEventListener('change', () => { touched(); row.reservation = el.reservation.value; schedulePreview(); });
+  el.vcores.addEventListener('change', () => { touched(); row.vcores = Math.max(1, +el.vcores.value || 1); schedulePreview(); });
+  el.storage.addEventListener('change', () => { row.storageGiB = +el.storage.value || 0; schedulePreview(); });
+
+  loadDbOptions(svc).then((o) => { opts = o; rebuild(); schedulePreview(); });
   return card;
 }
 
-// Fetch (and cache) the compute-plan list for a managed database service.
-async function loadDbSkus(service) {
-  state.dbSkus = state.dbSkus || {};
+// Fetch (and cache) the structured billing dimensions for a database service.
+async function loadDbOptions(service) {
+  state.dbOptions = state.dbOptions || {};
   const key = `${service}:${state.region}:${state.currency}`;
-  if (state.dbSkus[key]) return state.dbSkus[key];
+  if (state.dbOptions[key]) return state.dbOptions[key];
   try {
-    const list = await fetch(
-      `/api/azure/db-skus?service=${service}&region=${state.region}&currency=${state.currency}`
+    const o = await fetch(
+      `/api/azure/db-options?service=${service}&region=${state.region}&currency=${state.currency}`
     ).then((x) => x.json());
-    state.dbSkus[key] = Array.isArray(list) ? list : [];
+    state.dbOptions[key] = o && typeof o === 'object' ? o : { options: [] };
   } catch (e) {
-    console.error('db-skus error', e);
-    state.dbSkus[key] = [];
+    console.error('db-options error', e);
+    state.dbOptions[key] = { options: [] };
   }
-  return state.dbSkus[key];
+  return state.dbOptions[key];
 }
 
 // ---------- Add Backup from a VM ----------
@@ -1675,8 +1820,13 @@ async function renderScenarioChart() {
   ];
 
   const buildRows = (v) => state.rows.map((r) => {
-    if (r.type !== 'vm') return r;
-    return { ...r, reservation: v.reservation, hybridBenefit: v.hybridBenefit };
+    if (r.type === 'vm') return { ...r, reservation: v.reservation, hybridBenefit: v.hybridBenefit };
+    // Managed databases support compute reservations too (AHB does not apply);
+    // legacy flat-plan rows (computeKey) are PAYG-only, leave them untouched.
+    if (['sqldb', 'sqlmi', 'mysql', 'postgresql'].includes(r.type) && !r.computeKey) {
+      return { ...r, reservation: v.reservation };
+    }
+    return r;
   });
 
   let results;

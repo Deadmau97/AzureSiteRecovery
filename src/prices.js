@@ -133,8 +133,15 @@ export async function warmCache({ verbose = true } = {}) {
       const sqlMiFilter = `serviceName eq 'SQL Managed Instance' and ${regionFilter} and priceType eq 'Consumption'`;
       const mysqlFilter = `serviceName eq 'Azure Database for MySQL' and ${regionFilter} and priceType eq 'Consumption'`;
       const postgresFilter = `serviceName eq 'Azure Database for PostgreSQL' and ${regionFilter} and priceType eq 'Consumption'`;
+      // 19–22. Reserved-capacity (1Y/3Y) prices for the managed database services.
+      // RI covers the COMPUTE part only; retailPrice is the full-term total per vCore
+      // (or per instance for Flexible Server SKUs).
+      const sqlDbRiFilter = `serviceName eq 'SQL Database' and ${regionFilter} and priceType eq 'Reservation'`;
+      const sqlMiRiFilter = `serviceName eq 'SQL Managed Instance' and ${regionFilter} and priceType eq 'Reservation'`;
+      const mysqlRiFilter = `serviceName eq 'Azure Database for MySQL' and ${regionFilter} and priceType eq 'Reservation'`;
+      const postgresRiFilter = `serviceName eq 'Azure Database for PostgreSQL' and ${regionFilter} and priceType eq 'Reservation'`;
 
-      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles, flexDisks, sqlDatabase, sqlManagedInstance, mysql, postgresql] = await Promise.all([
+      const [asr, disks, vms, cacheStore, publicIp, bandwidth, vmReservations, backup, blobStorage, vpnGateway, natGateway, appServicePlan, azureFiles, flexDisks, sqlDatabase, sqlManagedInstance, mysql, postgresql, sqlDatabaseRi, sqlManagedInstanceRi, mysqlRi, postgresqlRi] = await Promise.all([
         fetchAllPages(asrFilter, currency),
         fetchAllPages(diskFilter, currency),
         fetchAllPages(vmFilter, currency, { pageLimit: 200 }),
@@ -153,6 +160,10 @@ export async function warmCache({ verbose = true } = {}) {
         fetchAllPages(sqlMiFilter, currency, { pageLimit: 200 }),
         fetchAllPages(mysqlFilter, currency, { pageLimit: 200 }),
         fetchAllPages(postgresFilter, currency, { pageLimit: 200 }),
+        fetchAllPages(sqlDbRiFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(sqlMiRiFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(mysqlRiFilter, currency, { pageLimit: 50 }),
+        fetchAllPages(postgresRiFilter, currency, { pageLimit: 50 }),
       ]);
 
       cache[currency] = {
@@ -174,6 +185,10 @@ export async function warmCache({ verbose = true } = {}) {
         sqlManagedInstance,
         mysql,
         postgresql,
+        sqlDatabaseRi,
+        sqlManagedInstanceRi,
+        mysqlRi,
+        postgresqlRi,
         updatedAt: new Date(),
       };
 
@@ -223,6 +238,9 @@ export async function hydrateCacheFromDb({ maxAgeHours = 24, verbose = true } = 
       cache[currency] = slot;
       const ageH = (Date.now() - new Date(snap.fetchedAt).getTime()) / 3600000;
       if (ageH > maxAgeHours) allFresh = false;
+      // Older snapshots predate the DB reservation slots — force a re-warm so the
+      // structured database configurator has RI prices to offer.
+      if (!slot.sqlDatabaseRi) allFresh = false;
       if (verbose) {
         console.log(`[prices] ${currency} hydrated from SQL snapshot (${ageH.toFixed(1)}h old, vms=${slot.vms?.length || 0})`);
       }
@@ -1123,5 +1141,347 @@ export function findSqlVmLicensePerVcpuHour(currency, edition) {
   const table = SQL_VM_LICENSE_PER_VCPU_HOUR[currency] || SQL_VM_LICENSE_PER_VCPU_HOUR.USD;
   const rate = table[edition];
   return rate == null ? null : { perVcpuHour: rate, edition, currency };
+}
+
+// ---------- Structured DB configuration (Azure-calculator-style dimensions) ----------
+// Instead of picking a raw "compute plan" meter, users pick the real billing
+// dimensions the way Azure sells the services:
+//   Azure SQL Database : Type (Single / Elastic Pool) + Purchase model (vCore / DTU)
+//                        + Service tier + Compute tier (Provisioned / Serverless)
+//                        + Hardware + vCores (or a DTU size) + optional 1Y/3Y RI.
+//   SQL Managed Inst.  : Service tier + Hardware + vCores + optional RI.
+//   MySQL / PostgreSQL : Flexible Server — Compute tier + Compute size (SKU) + optional RI.
+// Compute reservations apply to the compute meters only; storage is always PAYG.
+
+const DB_RI_SLOTS = {
+  sqldb: 'sqlDatabaseRi',
+  sqlmi: 'sqlManagedInstanceRi',
+  mysql: 'mysqlRi',
+  postgresql: 'postgresqlRi',
+};
+
+const DAYS_PER_MONTH = HOURS_PER_MONTH / 24; // ≈30.42, for DTU meters billed per day
+
+// Skip zone-redundant, geo-secondary, free and trial meters — they are variants
+// of the base compute meters and would pollute the dimension lists.
+function isExcludedDbMeter(i) {
+  return /zone redundancy|\bzrs?\b|secondary|free\b|trial/i.test(`${i.skuName || ''} ${i.meterName || ''}`);
+}
+
+function riTermHours(term) {
+  return /3/.test(term || '') ? HOURS_PER_YEAR * 3 : HOURS_PER_YEAR;
+}
+
+// RI retailPrice is normally the full-term total; a few entries publish hourly.
+function riEffectiveHourly(item) {
+  if (/hour/i.test(item.unitOfMeasure || '') && item.retailPrice < 5) return item.retailPrice;
+  return item.retailPrice / riTermHours(item.reservationTerm);
+}
+
+// 'vCore' → 1, '8 vCore' → 8, anything else → null.
+function skuVcoreCount(skuName) {
+  const sku = (skuName || '').trim();
+  if (/^vcore$/i.test(sku)) return 1;
+  const m = sku.match(/^(\d+)\s*vcores?$/i);
+  return m ? Number(m[1]) : null;
+}
+
+// Per-vCore hourly rate from a consumption item (meter 'vCore', unit '1 Hour').
+function perVcoreHourly(i) {
+  if (!/vcore/i.test(i.meterName || '')) return null;
+  if (!/hour/i.test(i.unitOfMeasure || '')) return null;
+  const n = skuVcoreCount(i.skuName);
+  return n ? i.retailPrice / n : null;
+}
+
+// Parse an Azure SQL Database productName into billing dimensions, e.g.
+//   "SQL Database Single/Elastic Pool General Purpose - Compute Gen5"
+//   "SQL Database Single General Purpose - Serverless - Compute Gen5"
+//   "SQL Database SingleDB/Elastic Pool Hyperscale - Compute Gen5"
+//   "SQL Database Single Standard"                (DTU)
+//   "SQL Database Elastic Pool - Premium"         (DTU pools)
+function parseSqlDbProduct(productName = '') {
+  if (!/^SQL Database /i.test(productName)) return null;
+  let p = productName.slice('SQL Database '.length).trim();
+  let deployment;
+  if (/^Single(DB)?\/Elastic Pool\b/i.test(p)) { deployment = 'both'; p = p.replace(/^Single(DB)?\/Elastic Pool\s*/i, ''); }
+  else if (/^Elastic Pool\b/i.test(p)) { deployment = 'elastic'; p = p.replace(/^Elastic Pool\s*-?\s*/i, ''); }
+  else if (/^Single(DB)?\b/i.test(p)) { deployment = 'single'; p = p.replace(/^Single(DB)?\s*/i, ''); }
+  else return null;
+  const tm = p.match(/^(General Purpose|Business Critical|Hyperscale|Basic|Standard|Premium)\b/i);
+  if (!tm) return null;
+  const tier = tm[1];
+  p = p.slice(tier.length).replace(/^\s*-\s*/, '').trim();
+  const purchaseModel = /^(Basic|Standard|Premium)$/i.test(tier) ? 'DTU' : 'vCore';
+  const serverless = /serverless/i.test(p);
+  const hardware = p.replace(/serverless/gi, ' ').replace(/compute/gi, ' ').replace(/[-–]/g, ' ').replace(/\s+/g, ' ').trim();
+  return {
+    deployment,
+    tier,
+    purchaseModel,
+    computeTier: serverless ? 'Serverless' : 'Provisioned',
+    hardware: hardware || null,
+  };
+}
+
+// Whether a compute option (from a 'Single/Elastic Pool' product) applies to the
+// deployment type chosen in the UI ('Single' | 'Elastic Pool').
+function depMatch(optionDep, rowDep) {
+  if (optionDep === 'both') return true;
+  if (optionDep === 'elastic') return rowDep === 'Elastic Pool';
+  return rowDep !== 'Elastic Pool';
+}
+
+function buildSqlDbOptions(consumption, reservations) {
+  const vcore = new Map(); // deployment|tier|computeTier|hardware → option
+  const dtu = new Map();   // deployment|tier|sku → option
+  for (const i of consumption) {
+    if (isExcludedDbMeter(i)) continue;
+    const parsed = parseSqlDbProduct(i.productName);
+    if (!parsed) continue;
+    if (parsed.purchaseModel === 'vCore') {
+      const per = perVcoreHourly(i);
+      if (per == null || !parsed.hardware) continue;
+      const key = [parsed.deployment, parsed.tier, parsed.computeTier, parsed.hardware].join('|');
+      const cur = vcore.get(key);
+      if (!cur || per < cur.perVcoreHour) {
+        vcore.set(key, { purchaseModel: 'vCore', ...parsed, perVcoreHour: per, ri: {} });
+      }
+    } else {
+      // DTU meters bill the whole SKU per day (S0…S12, P1…P15, B, "100 eDTU" pools).
+      const sku = (i.skuName || '').trim();
+      if (!/^(B\d*|S\d+|P\d+[A-Z]?|\d+\s*eDTUs?)$/i.test(sku)) continue;
+      const uom = i.unitOfMeasure || '';
+      let monthly = null;
+      if (/day/i.test(uom)) monthly = i.retailPrice * DAYS_PER_MONTH;
+      else if (/hour/i.test(uom)) monthly = i.retailPrice * HOURS_PER_MONTH;
+      else if (/month/i.test(uom)) monthly = i.retailPrice;
+      if (monthly == null || monthly <= 0) continue;
+      const key = [parsed.deployment, parsed.tier, sku].join('|');
+      const cur = dtu.get(key);
+      if (!cur || monthly < cur.monthly) {
+        dtu.set(key, { purchaseModel: 'DTU', deployment: parsed.deployment, tier: parsed.tier, sku, monthly });
+      }
+    }
+  }
+  // Attach 1Y/3Y reserved per-vCore rates to the matching vCore options.
+  for (const i of reservations) {
+    if (isExcludedDbMeter(i)) continue;
+    const parsed = parseSqlDbProduct(i.productName);
+    if (!parsed || parsed.purchaseModel !== 'vCore') continue;
+    const n = skuVcoreCount(i.skuName);
+    if (n == null) continue;
+    const opt = vcore.get([parsed.deployment, parsed.tier, parsed.computeTier, parsed.hardware].join('|'));
+    if (!opt) continue;
+    const term = /3/.test(i.reservationTerm || '') ? '3y' : '1y';
+    const per = riEffectiveHourly(i) / n;
+    if (opt.ri[term] == null || per < opt.ri[term]) opt.ri[term] = per;
+  }
+  const vcoreList = [...vcore.values()].sort((a, b) => a.perVcoreHour - b.perVcoreHour);
+  const dtuList = [...dtu.values()].sort((a, b) => a.monthly - b.monthly);
+  return { vcore: vcoreList, dtu: dtuList };
+}
+
+// "SQL Managed Instance General Purpose - Compute Gen5" → tier + hardware.
+function parseSqlMiProduct(productName = '') {
+  const m = (productName || '').match(/^SQL Managed Instance\s+(.*?)\s*(General Purpose|Business Critical)\s*-\s*Compute\s+(.+)$/i);
+  if (!m) return null;
+  const prefix = (m[1] || '').trim();
+  return {
+    tier: prefix ? `${prefix} ${m[2]}` : m[2],
+    hardware: m[3].replace(/[-–]/g, ' ').replace(/\s+/g, ' ').trim(),
+  };
+}
+
+function buildSqlMiOptions(consumption, reservations) {
+  const map = new Map(); // tier|hardware → option
+  for (const i of consumption) {
+    if (isExcludedDbMeter(i)) continue;
+    const parsed = parseSqlMiProduct(i.productName);
+    if (!parsed) continue;
+    const per = perVcoreHourly(i);
+    if (per == null) continue;
+    const key = [parsed.tier, parsed.hardware].join('|');
+    const cur = map.get(key);
+    if (!cur || per < cur.perVcoreHour) map.set(key, { ...parsed, perVcoreHour: per, ri: {} });
+  }
+  for (const i of reservations) {
+    if (isExcludedDbMeter(i)) continue;
+    const parsed = parseSqlMiProduct(i.productName);
+    if (!parsed) continue;
+    const n = skuVcoreCount(i.skuName);
+    if (n == null) continue;
+    const opt = map.get([parsed.tier, parsed.hardware].join('|'));
+    if (!opt) continue;
+    const term = /3/.test(i.reservationTerm || '') ? '3y' : '1y';
+    const per = riEffectiveHourly(i) / n;
+    if (opt.ri[term] == null || per < opt.ri[term]) opt.ri[term] = per;
+  }
+  return [...map.values()].sort((a, b) => a.perVcoreHour - b.perVcoreHour);
+}
+
+// "Azure Database for MySQL Flexible Server General Purpose Dadsv5 Series Compute"
+// → tier 'General Purpose', hardware 'Dadsv5'; the SKU (e.g. 'D2ads v5') is the meter.
+function parseFlexProduct(productName = '') {
+  const m = (productName || '').match(/Flexible Server\s+(Burstable|General Purpose|Memory Optimized|Business Critical)\s+(.*?)\s*Compute$/i);
+  if (!m) return null;
+  const hardware = m[2].replace(/\bseries\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  return { tier: m[1], hardware: hardware || null };
+}
+
+function buildFlexOptions(consumption, reservations) {
+  const map = new Map(); // tier|sku → option
+  for (const i of consumption) {
+    if (isExcludedDbMeter(i)) continue;
+    const parsed = parseFlexProduct(i.productName);
+    if (!parsed) continue;
+    if (!/hour/i.test(i.unitOfMeasure || '')) continue;
+    const sku = (i.meterName || '').trim();
+    if (!sku || /vcore|storage|iops|backup/i.test(sku)) continue;
+    const vm = sku.match(/^[A-Z]+?(\d+)/i);
+    const key = [parsed.tier, sku].join('|');
+    const cur = map.get(key);
+    if (!cur || i.retailPrice < cur.hourly) {
+      map.set(key, {
+        tier: parsed.tier,
+        hardware: parsed.hardware,
+        sku,
+        vcores: vm ? Number(vm[1]) : null,
+        hourly: i.retailPrice,
+        ri: {},
+      });
+    }
+  }
+  for (const i of reservations) {
+    if (isExcludedDbMeter(i)) continue;
+    const parsed = parseFlexProduct(i.productName);
+    if (!parsed) continue;
+    const sku = (i.meterName || i.skuName || '').trim();
+    const opt = map.get([parsed.tier, sku].join('|'));
+    if (!opt) continue;
+    const term = /3/.test(i.reservationTerm || '') ? '3y' : '1y';
+    const per = riEffectiveHourly(i);
+    if (opt.ri[term] == null || per < opt.ri[term]) opt.ri[term] = per;
+  }
+  return [...map.values()].sort((a, b) => a.hourly - b.hourly);
+}
+
+/**
+ * All available billing dimensions for a managed database service in a region.
+ * sqldb → { service, vcore: [...], dtu: [...] }; others → { service, options: [...] }.
+ */
+export function listDbConfigOptions(currency, armRegionName, serviceKey) {
+  const cons = getRegional(cache[currency]?.[DB_SLOTS[serviceKey]] || [], armRegionName);
+  const ri = getRegional(cache[currency]?.[DB_RI_SLOTS[serviceKey]] || [], armRegionName);
+  if (serviceKey === 'sqldb') return { service: 'sqldb', ...buildSqlDbOptions(cons, ri) };
+  if (serviceKey === 'sqlmi') return { service: 'sqlmi', options: buildSqlMiOptions(cons, ri) };
+  return { service: serviceKey, options: buildFlexOptions(cons, ri) };
+}
+
+/**
+ * Monthly compute cost for a structured DB row.
+ * cfg: { deployment, purchaseModel, tier, computeTier, hardware, vcores, dtuSku, sku, reservation }
+ * Returns { monthly, billing: 'payg'|'reservation', detail, includesStorage } or null.
+ */
+export function resolveDbCompute(currency, armRegionName, serviceKey, cfg) {
+  const o = listDbConfigOptions(currency, armRegionName, serviceKey);
+  const term = cfg.reservation === '1y' ? '1y' : cfg.reservation === '3y' ? '3y' : null;
+  const termLabel = term === '1y' ? '1-year reserved' : term === '3y' ? '3-year reserved' : 'PAYG';
+
+  if (serviceKey === 'sqldb' && cfg.purchaseModel === 'DTU') {
+    const hit = o.dtu.find(
+      (x) => depMatch(x.deployment, cfg.deployment) && x.tier === cfg.tier && x.sku === cfg.dtuSku
+    );
+    if (!hit) return null;
+    return {
+      monthly: hit.monthly,
+      billing: 'payg',
+      includesStorage: true,
+      detail: `${cfg.deployment === 'Elastic Pool' ? 'Elastic pool' : 'Single database'} · ${hit.tier} ${hit.sku} (DTU, storage included)`,
+    };
+  }
+
+  // Per-vCore services: SQL Database vCore model & SQL Managed Instance.
+  if (serviceKey === 'sqldb' || serviceKey === 'sqlmi') {
+    const list = serviceKey === 'sqldb' ? o.vcore : o.options;
+    const computeTier = cfg.computeTier || 'Provisioned';
+    const hit = list.find(
+      (x) =>
+        x.tier === cfg.tier &&
+        x.hardware === cfg.hardware &&
+        (serviceKey === 'sqlmi' || (depMatch(x.deployment, cfg.deployment) && x.computeTier === computeTier))
+    );
+    if (!hit) return null;
+    const vcores = Math.max(1, Number(cfg.vcores) || 1);
+    let rate = hit.perVcoreHour;
+    let billing = 'payg';
+    let note = 'PAYG';
+    if (term && computeTier !== 'Serverless' && hit.ri && hit.ri[term] != null) {
+      rate = hit.ri[term];
+      billing = 'reservation';
+      note = termLabel;
+    } else if (term) {
+      note = 'PAYG (no RI price published)';
+    }
+    const parts = serviceKey === 'sqldb'
+      ? [cfg.deployment === 'Elastic Pool' ? 'Elastic pool' : 'Single database', hit.tier, computeTier, hit.hardware]
+      : [hit.tier, hit.hardware];
+    return {
+      monthly: rate * vcores * HOURS_PER_MONTH,
+      billing,
+      detail: `${parts.join(' · ')} · ${vcores} vCore — ${note}`,
+    };
+  }
+
+  // MySQL / PostgreSQL Flexible Server: per-instance hourly SKU.
+  const hit = o.options.find((x) => x.tier === cfg.tier && x.sku === cfg.sku);
+  if (!hit) return null;
+  let rate = hit.hourly;
+  let billing = 'payg';
+  let note = 'PAYG';
+  if (term && hit.ri && hit.ri[term] != null) {
+    rate = hit.ri[term];
+    billing = 'reservation';
+    note = termLabel;
+  } else if (term) {
+    note = 'PAYG (no RI price published)';
+  }
+  return {
+    monthly: rate * HOURS_PER_MONTH,
+    billing,
+    detail: `${hit.tier} · ${hit.sku}${hit.vcores ? ` (${hit.vcores} vCore)` : ''} — ${note}`,
+  };
+}
+
+/**
+ * Monthly storage cost for a structured DB row. DTU tiers include storage;
+ * SQL MI includes 32 GiB per vCore. Prefers a storage meter matching the
+ * selected service tier, falls back to the cheapest one.
+ * Returns { monthly, perGiB, detail, included } or null when no meter exists.
+ */
+export function resolveDbStorage(currency, armRegionName, serviceKey, cfg) {
+  const gib = Math.max(0, Number(cfg.storageGiB) || 0);
+  if (serviceKey === 'sqldb' && cfg.purchaseModel === 'DTU') {
+    return { monthly: 0, perGiB: 0, detail: 'Included in the DTU tier', included: true };
+  }
+  if (gib === 0) return { monthly: 0, perGiB: 0, detail: null, included: false };
+  let billable = gib;
+  let note = `${gib} GiB`;
+  if (serviceKey === 'sqlmi') {
+    const included = 32 * Math.max(1, Number(cfg.vcores) || 4);
+    billable = Math.max(0, gib - included);
+    note = `${gib} GiB (first ${included} GiB included)`;
+  }
+  const items = getRegional(cache[currency]?.[DB_SLOTS[serviceKey]] || [], armRegionName).filter(
+    (i) => isDbStorageMeter(i) && !isExcludedDbMeter(i)
+  );
+  if (items.length === 0) return null;
+  const tierHits = cfg.tier
+    ? items.filter((i) => (i.productName || '').toLowerCase().includes(String(cfg.tier).toLowerCase()))
+    : [];
+  const pool = tierHits.length > 0 ? tierHits : items;
+  pool.sort((a, b) => a.retailPrice - b.retailPrice);
+  const hit = pool[0];
+  return { monthly: hit.retailPrice * billable, perGiB: hit.retailPrice, detail: note, included: false };
 }
 

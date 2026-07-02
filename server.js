@@ -35,6 +35,7 @@ import {
   listNatGatewaySkus,
   listPublicIpSkus,
   listDbComputeSkus,
+  listDbConfigOptions,
 } from './src/prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +159,16 @@ app.get('/api/azure/db-skus', (req, res) => {
   const allowed = ['sqldb', 'sqlmi', 'mysql', 'postgresql'];
   if (!allowed.includes(service)) return res.status(400).json({ error: 'unknown database service' });
   res.json(listDbComputeSkus(currency || 'EUR', region, service));
+});
+
+// Structured billing dimensions for a managed database service (type / purchase
+// model / service tier / compute tier / hardware / DTU sizes / RI rates).
+app.get('/api/azure/db-options', (req, res) => {
+  const { region, currency, service } = req.query;
+  if (!region) return res.status(400).json({ error: 'region is required' });
+  const allowed = ['sqldb', 'sqlmi', 'mysql', 'postgresql'];
+  if (!allowed.includes(service)) return res.status(400).json({ error: 'unknown database service' });
+  res.json(listDbConfigOptions(currency || 'EUR', region, service));
 });
 
 // Debug: resolved monthly price for every disk tier in a region.

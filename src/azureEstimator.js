@@ -19,6 +19,8 @@ import {
   findAppServicePlanPrice,
   findDbComputePrice,
   findDbStoragePricePerGiBMonth,
+  resolveDbCompute,
+  resolveDbStorage,
   findSqlVmLicensePerVcpuHour,
   HOURS_PER_MONTH,
 } from './prices.js';
@@ -352,42 +354,70 @@ export function estimateAzure(input) {
       case 'sqlmi':
       case 'mysql':
       case 'postgresql': {
-        // Managed database services (PaaS). Priced as: selected compute plan
-        // (hourly \u00d7 730) + optional provisioned storage (GiB \u00d7 per-GiB/month).
+        // Managed database services (PaaS), priced from the real billing dimensions
+        // (type / purchase model / service tier / compute tier / hardware / vCores
+        // or DTU size) + optional 1Y/3Y compute reservation + provisioned storage.
         const labels = {
           sqldb: 'Azure SQL Database', sqlmi: 'Azure SQL Managed Instance',
           mysql: 'Azure Database for MySQL', postgresql: 'Azure Database for PostgreSQL',
         };
+        const label = labels[row.type] || 'Database';
+
         if (row.computeKey) {
+          // Legacy saved configs picked a flat compute-plan meter.
           const cp = findDbComputePrice(currency, armRegionName, row.type, row.computeKey);
           if (cp) {
             const m = cp.hourly * HOURS_PER_MONTH;
             monthly += m;
             lineItems.push({
-              category: labels[row.type] || 'Database',
+              category: label,
               detail: `${cp.key} \u2014 ${HOURS_PER_MONTH}h/mo`,
               amount: m,
               billing: 'payg',
             });
           } else {
-            warnings.push(`No compute price for ${labels[row.type]} plan "${row.computeKey}" in ${armRegionName}/${currency}.`);
+            warnings.push(`No compute price for ${label} plan "${row.computeKey}" in ${armRegionName}/${currency}.`);
           }
+          const legacyGiB = Math.max(0, Number(row.storageGiB) || 0);
+          if (legacyGiB > 0) {
+            const sp = findDbStoragePricePerGiBMonth(currency, armRegionName, row.type);
+            if (sp) {
+              const m = sp.retailPrice * legacyGiB;
+              monthly += m;
+              lineItems.push({
+                category: `${label} storage`,
+                detail: `${legacyGiB} GiB provisioned`,
+                amount: m,
+                billing: 'payg',
+              });
+            }
+          }
+          break;
         }
-        const storageGiB = Math.max(0, Number(row.storageGiB) || 0);
-        if (storageGiB > 0) {
-          const sp = findDbStoragePricePerGiBMonth(currency, armRegionName, row.type);
-          if (sp) {
-            const m = sp.retailPrice * storageGiB;
-            monthly += m;
-            lineItems.push({
-              category: `${labels[row.type] || 'Database'} storage`,
-              detail: `${storageGiB} GiB provisioned`,
-              amount: m,
-              billing: 'payg',
-            });
-          } else {
-            warnings.push(`No storage price for ${labels[row.type]} in ${armRegionName}/${currency}.`);
-          }
+
+        const comp = resolveDbCompute(currency, armRegionName, row.type, row);
+        if (comp) {
+          monthly += comp.monthly;
+          lineItems.push({
+            category: `${label} compute`,
+            detail: comp.detail,
+            amount: comp.monthly,
+            billing: comp.billing,
+          });
+        } else {
+          warnings.push(`No ${label} price for the selected configuration in ${armRegionName}/${currency}.`);
+        }
+        const st = resolveDbStorage(currency, armRegionName, row.type, row);
+        if (st && (st.monthly > 0 || st.included)) {
+          monthly += st.monthly;
+          lineItems.push({
+            category: `${label} storage`,
+            detail: st.detail,
+            amount: st.monthly,
+            billing: 'payg',
+          });
+        } else if (st === null && Math.max(0, Number(row.storageGiB) || 0) > 0) {
+          warnings.push(`No storage price for ${label} in ${armRegionName}/${currency}.`);
         }
         break;
       }

@@ -658,13 +658,43 @@
         </header>
         <div class="row-body">
           <div class="row-fields">
-            <label class="field-flat db-compute-wrap"><span>Compute plan</span>
-              <select class="db-compute"></select>
+            <label class="field-flat db-deployment-wrap"><span>Type</span>
+              <select class="db-deployment">
+                <option value="Single" selected>Single database</option>
+                <option value="Elastic Pool">Elastic pool</option>
+              </select>
             </label>
-            <label class="field-flat db-search-wrap"><span>Find plan</span>
-              <input type="search" class="db-search" placeholder="Type to filter compute plans…" autocomplete="off" />
+            <label class="field-flat db-purchase-wrap"><span>Purchase model</span>
+              <select class="db-purchase">
+                <option value="vCore" selected>vCore</option>
+                <option value="DTU">DTU</option>
+              </select>
             </label>
-            <label class="field-flat"><span>Storage (GiB)</span><input type="number" class="db-storage" min="0" value="32" /></label>
+            <label class="field-flat db-tier-wrap"><span>Service tier</span>
+              <select class="db-tier"></select>
+            </label>
+            <label class="field-flat db-computetier-wrap"><span>Compute tier</span>
+              <select class="db-computetier"></select>
+            </label>
+            <label class="field-flat db-hardware-wrap"><span>Hardware type</span>
+              <select class="db-hardware"></select>
+            </label>
+            <label class="field-flat db-vcores-wrap"><span>Instance (vCores)</span>
+              <input type="number" class="db-vcores" min="1" step="1" value="2" />
+            </label>
+            <label class="field-flat db-sku-wrap"><span>Compute size</span>
+              <select class="db-sku"></select>
+            </label>
+            <label class="field-flat db-reservation-wrap"><span>Reservation (compute)</span>
+              <select class="db-reservation">
+                <option value="payg" selected>Pay as you go</option>
+                <option value="1y">1 year reserved</option>
+                <option value="3y">3 years reserved</option>
+              </select>
+            </label>
+            <label class="field-flat db-storage-wrap"><span>Storage (GiB)</span>
+              <input type="number" class="db-storage" min="0" value="32" />
+            </label>
           </div>
         </div>
       </article>
